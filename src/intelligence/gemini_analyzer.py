@@ -210,31 +210,45 @@ def _parse_batch_response(text: str) -> list[dict]:
 def filter_rss_with_gemini(
     rss_texts: list[str],
     api_key: Optional[str],
-) -> list[dict]:
-    """RSS 헤드라인을 Gemini로 필터링. Strong Buy·목표가 상향 등 긍정적 애널리스트 의견 종목만 추출.
+) -> dict:
+    """RSS 헤드라인을 Gemini로 필터링. 추천 종목 + 위험신호 종목 분리 추출.
 
     Returns:
-        [{"ticker": "AAPL", "name": "Apple", "reason": "...", "source": "Finviz"}, ...]
+        {"recommended": [{"ticker","name","reason","source"}, ...], "warning": [...]}
     """
+    out = {"recommended": [], "warning": []}
     if not rss_texts or not api_key:
-        return []
+        return out
     if not HAS_GENAI:
-        return []
+        return out
 
     _ensure_genai(api_key)
     model = genai.GenerativeModel(MODEL_NAME)
 
     block = "\n".join(rss_texts[:80])  # 토큰 제한
     prompt = f"""아래는 금융 뉴스/애널리스트 헤드라인입니다.
-애널리스트 분석·리포트·추천·매수·목표가·Upgrade 등 종목이 언급된 항목에서
-종목 티커, 종목명, 간단 근거, 출처를 추출하세요. 가능한 한 10개까지 선별 (최대 10개).
+두 가지로 분류하세요:
+1) 추천: Strong Buy, Upgrade, 목표가 상향, 매수 추천 등 긍정적 의견 (최대 10개)
+2) 위험신호: Downgrade, Sell, 목표가 하향, 매도, 리스크 경고 등 부정적 의견 (최대 10개)
 
 [헤드라인]
 {block}
 
 반드시 아래 JSON 형식만 출력 (다른 텍스트 없이):
-[{{"ticker":"AAPL","name":"Apple","reason":"리포트 언급","source":"Finviz"}}, ...]
-미국주: AAPL, PLTR 등. 한국주: 005930.KS 등. 헤드라인에서 확인 가능한 종목만 포함."""
+{{"recommended":[{{"ticker":"AAPL","name":"Apple","reason":"목표가 상향","source":"Finviz"}}],"warning":[{{"ticker":"XYZ","name":"XYZ","reason":"목표가 하향","source":"Seeking Alpha"}}]}}
+미국주: AAPL 등. 한국주: 005930.KS 등. 헤드라인에서 확인 가능한 종목만."""
+
+    def _parse_list(arr):
+        result = []
+        for x in (arr or []):
+            if isinstance(x, dict) and x.get("ticker"):
+                result.append({
+                    "ticker": str(x.get("ticker", "")).strip(),
+                    "name": str(x.get("name", x.get("ticker", ""))).strip() or x.get("ticker", ""),
+                    "reason": str(x.get("reason", ""))[:200],
+                    "source": str(x.get("source", ""))[:50] or "RSS",
+                })
+        return result[:10]
 
     try:
         resp = model.generate_content(
@@ -242,7 +256,58 @@ def filter_rss_with_gemini(
             generation_config=genai.types.GenerationConfig(temperature=0.1, max_output_tokens=2048),
         )
         text = (resp.text or "").strip()
-        # JSON 블록 추출
+        start = text.find("{")
+        if start < 0:
+            return out
+        end = text.rfind("}") + 1
+        if end <= start:
+            return out
+        obj = json.loads(text[start:end])
+        if isinstance(obj, dict):
+            out["recommended"] = _parse_list(obj.get("recommended"))
+            out["warning"] = _parse_list(obj.get("warning"))
+    except Exception:
+        pass
+    return out
+
+
+def analyze_top_stocks_with_rss(
+    top_tickers: list[tuple[str, str]],
+    rss_texts: list[str],
+    api_key: Optional[str],
+) -> list[dict]:
+    """매수세 Top 10 종목에 대한 애널리스트 분석. RSS 헤드라인 기반.
+
+    Returns:
+        [{"ticker":"005930.KS","name":"삼성전자","analysis":"..."}, ...]
+    """
+    if not top_tickers or not rss_texts or not api_key or not HAS_GENAI:
+        return []
+
+    _ensure_genai(api_key)
+    model = genai.GenerativeModel(MODEL_NAME)
+
+    ticker_str = ", ".join(f"{t} ({n})" for t, n in top_tickers)
+    block = "\n".join(rss_texts[:60])
+
+    prompt = f"""아래는 거래량(매수세) 상위 10종목입니다: {ticker_str}
+
+아래 RSS 헤드라인에서 위 종목들이 언급된 경우, 해당 종목에 대한 애널리스트 의견·분석을 1~2문장으로 요약하세요.
+언급이 없으면 "최근 RSS 언급 없음"으로 표시.
+
+[헤드라인]
+{block}
+
+JSON 배열만 출력:
+[{{"ticker":"005930.KS","name":"삼성전자","analysis":"요약"}}, ...]
+"""
+
+    try:
+        resp = model.generate_content(
+            prompt,
+            generation_config=genai.types.GenerationConfig(temperature=0.2, max_output_tokens=2048),
+        )
+        text = (resp.text or "").strip()
         start = text.find("[")
         if start < 0:
             return []
@@ -250,16 +315,13 @@ def filter_rss_with_gemini(
         if end <= start:
             return []
         arr = json.loads(text[start:end])
-        if not isinstance(arr, list):
-            return []
         out = []
-        for x in arr:
+        for x in (arr or []):
             if isinstance(x, dict) and x.get("ticker"):
                 out.append({
                     "ticker": str(x.get("ticker", "")).strip(),
-                    "name": str(x.get("name", x.get("ticker", ""))).strip() or x.get("ticker", ""),
-                    "reason": str(x.get("reason", ""))[:200],
-                    "source": str(x.get("source", ""))[:50] or "RSS",
+                    "name": str(x.get("name", x.get("ticker", ""))).strip(),
+                    "analysis": str(x.get("analysis", ""))[:250],
                 })
         return out[:10]
     except Exception:

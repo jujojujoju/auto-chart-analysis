@@ -30,9 +30,12 @@ from src.data.market_data import fetch_ohlcv_cached
 from src.data.analyst_sources import fetch_all_analyst_items
 from src.logic.ohlcv_processor import process_ohlcv_to_json
 from src.logic.chart_compress import compress_all_charts
+from src.logic.volume_rank import get_top_by_buying_pressure
+from src.data.rss_sources import fetch_all_rss_items
 from src.intelligence.gemini_analyzer import (
     load_sample_charts,
     analyze_all_charts_single_call,
+    analyze_top_stocks_with_rss,
 )
 from src.delivery.telegram_notifier import send_telegram
 
@@ -75,10 +78,20 @@ def run():
 
     print(f"  처리 완료: {len(charts)}개 종목")
 
+    # 2a. 매수세 Top 10 + 애널리스트 분석
+    top10 = get_top_by_buying_pressure(charts, ticker_names, n=10)
+    top10_analysis: list = []
+    if top10 and GEMINI_API_KEY:
+        rss_items = fetch_all_rss_items()
+        rss_texts = [f"[{r.source}] {r.title} | {r.summary[:150]}" for r in rss_items]
+        top10_analysis = analyze_top_stocks_with_rss(top10, rss_texts, GEMINI_API_KEY)
+    if not top10_analysis and top10:
+        top10_analysis = [{"ticker": t, "name": n, "analysis": "RSS 분석 대기"} for t, n in top10]
+
     # 2b. 애널리스트 정보 수집 (Founders Fund + RSS/Gemini 필터)
     print("\n[2b/5] 애널리스트 소스 수집...")
-    analyst_items = fetch_all_analyst_items(api_key=GEMINI_API_KEY)
-    print("  수집:", len(analyst_items), "건")
+    analyst_recommended, analyst_warning = fetch_all_analyst_items(api_key=GEMINI_API_KEY)
+    print("  추천:", len(analyst_recommended), "건 / 위험신호:", len(analyst_warning), "건")
 
     # 3. Intelligence: 1회 호출로 전체 차트 분석
     print("\n[3/5] Intelligence Layer: Gemini 1회 호출 패턴 매칭...")
@@ -108,12 +121,11 @@ def run():
 
     msg_parts = ["📊 <b>AI 투자 비서 일일 리포트</b>\n"]
 
-    if api_error_msg:
-        msg_parts.append("⚠️ <b>Gemini API 제한 오류</b>\n%s\n\n" % _esc(api_error_msg[:500]))
-
-    # -- 차트 분석 --
+    # -- 차트 분석 -- (Gemini 초과 시 여기에만 에러 표시)
     msg_parts.append("<b>-- 차트 분석 --</b>\n")
-    if pattern_matches:
+    if api_error_msg:
+        msg_parts.append("⚠️ %s\n" % _esc(api_error_msg[:400]))
+    elif pattern_matches:
         for i, m in enumerate(pattern_matches[:20], 1):
             name = m.get("name", m.get("symbol", "?"))
             ticker = m.get("symbol", "?")
@@ -125,14 +137,35 @@ def run():
 
     # -- 종목 분석 (애널리스트/펀드) --
     msg_parts.append("<b>-- 종목 분석 --</b>\n")
-    if analyst_items:
-        for i, a in enumerate(analyst_items[:20], 1):
+    msg_parts.append("📌 추천 (매수·상향 등)\n")
+    if analyst_recommended:
+        for i, a in enumerate(analyst_recommended[:15], 1):
             msg_parts.append(
                 "%d. %s, %s, %s, 출처: %s\n"
                 % (i, a.name, a.ticker, _esc(a.reason)[:150], a.source)
             )
     else:
-        msg_parts.append("수집된 애널리스트 정보 없음\n")
+        msg_parts.append("없음\n")
+    msg_parts.append("\n⚠️ 위험신호 (매도·하향 등)\n")
+    if analyst_warning:
+        for i, a in enumerate(analyst_warning[:15], 1):
+            msg_parts.append(
+                "%d. %s, %s, %s, 출처: %s\n"
+                % (i, a.name, a.ticker, _esc(a.reason)[:150], a.source)
+            )
+    else:
+        msg_parts.append("없음\n")
+
+    # -- 매수세 Top 10 애널리스트 분석 --
+    msg_parts.append("\n<b>-- 매수세 Top 10 애널리스트 분석 --</b>\n")
+    if top10_analysis:
+        for i, a in enumerate(top10_analysis[:10], 1):
+            msg_parts.append(
+                "%d. %s (%s): %s\n"
+                % (i, a.get("name", "?"), a.get("ticker", "?"), _esc(a.get("analysis", ""))[:180])
+            )
+    else:
+        msg_parts.append("분석 없음\n")
 
     message = "\n".join(msg_parts)
     chunk_size = 4000
@@ -149,10 +182,15 @@ def run():
     report = {
         "tickers": tickers,
         "pattern_matches": pattern_matches,
-        "analyst_items": [
+        "analyst_recommended": [
             {"name": a.name, "ticker": a.ticker, "reason": a.reason, "source": a.source}
-            for a in analyst_items
+            for a in analyst_recommended
         ],
+        "analyst_warning": [
+            {"name": a.name, "ticker": a.ticker, "reason": a.reason, "source": a.source}
+            for a in analyst_warning
+        ],
+        "top10_buying_pressure": top10_analysis,
         "api_error": api_error_msg,
     }
     with open(OUTPUT_DIR / "daily_report.json", "w", encoding="utf-8") as f:
