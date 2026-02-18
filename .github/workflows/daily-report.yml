@@ -1,15 +1,14 @@
-# AI 투자 비서 리포트 실행
-# 필요한 GitHub Secrets: GEMINI_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
-name: AI 투자 비서 리포트
+# AI Investment Report - requires secrets: GEMINI_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+name: AI Investment Report
 
 on:
   schedule:
-    # 테스트: 10분마다 (필요시 매일로 변경: "0 0 * * *")
+    # Every 10 min (change to "0 0 * * *" for daily)
     - cron: "*/10 * * * *"
-  workflow_dispatch:  # 수동 실행 가능
+  workflow_dispatch:
 
 jobs:
-  report:
+  run-report:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
