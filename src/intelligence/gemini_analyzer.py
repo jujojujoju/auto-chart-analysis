@@ -226,15 +226,15 @@ def filter_rss_with_gemini(
 
     block = "\n".join(rss_texts[:80])  # 토큰 제한
     prompt = f"""아래는 금융 뉴스/애널리스트 헤드라인입니다.
-이 중에서 'Strong Buy', '목표가 상향', 'Upgrade', 'Outperform', '애널리스트 추천', '매수 추천' 등 긍정적 애널리스트 의견이 포함된 항목만 선별하세요.
-각 항목에서 종목 티커(심볼)와 종목명, 간단 근거, 출처를 추출하세요.
+애널리스트 분석·리포트·추천·매수·목표가·Upgrade 등 종목이 언급된 항목에서
+종목 티커, 종목명, 간단 근거, 출처를 추출하세요. 가능한 한 10개까지 선별 (최대 10개).
 
 [헤드라인]
 {block}
 
 반드시 아래 JSON 형식만 출력 (다른 텍스트 없이):
-[{{"ticker":"AAPL","name":"Apple","reason":"목표가 상향","source":"Finviz"}}, ...]
-미국주: AAPL, PLTR 등. 한국주: 005930.KS, 035720.KS 등 형식. 해당 없으면 []만 출력."""
+[{{"ticker":"AAPL","name":"Apple","reason":"리포트 언급","source":"Finviz"}}, ...]
+미국주: AAPL, PLTR 등. 한국주: 005930.KS 등. 헤드라인에서 확인 가능한 종목만 포함."""
 
     try:
         resp = model.generate_content(
@@ -261,7 +261,7 @@ def filter_rss_with_gemini(
                     "reason": str(x.get("reason", ""))[:200],
                     "source": str(x.get("source", ""))[:50] or "RSS",
                 })
-        return out[:25]
+        return out[:10]
     except Exception:
         return []
 
