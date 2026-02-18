@@ -1,0 +1,59 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# 가상환경
+.venv/
+venv/
+ENV/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# 데이터/캐시 (용량 큰 파일)
+data/*.csv
+data/*.parquet
+data/*.db
+*.log
+.cache/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 환경 변수/시크릿
+.env
+.env.local
+*.key
+
+# 출력
+output/
+
+# 캐시 (유튜브 종목 리스트 등)
+cache/

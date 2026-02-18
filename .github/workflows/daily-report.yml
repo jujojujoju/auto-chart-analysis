@@ -1,0 +1,39 @@
+# AI 투자 비서 리포트 실행
+# 필요한 GitHub Secrets: GEMINI_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+name: AI 투자 비서 리포트
+
+on:
+  schedule:
+    # 테스트: 10분마다 (필요시 매일로 변경: "0 0 * * *")
+    - cron: "*/10 * * * *"
+  workflow_dispatch:  # 수동 실행 가능
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache OHLCV
+        uses: actions/cache@v4
+        with:
+          path: cache/ohlcv
+          key: ohlcv-v1
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+
+      - name: Run pipeline
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+        run: python run_pipeline.py
