@@ -18,13 +18,17 @@ class AnalystItem:
     source: str     # 출처
 
 
-def fetch_all_analyst_items(api_key: Optional[str] = None) -> Tuple[List[AnalystItem], List[AnalystItem]]:
+def fetch_all_analyst_items(
+    api_key: Optional[str] = None,
+    dart_api_key: Optional[str] = None,
+) -> Tuple[List[AnalystItem], List[AnalystItem]]:
     """모든 애널리스트 소스에서 수집.
     Returns: (추천 종목 리스트, 위험신호 종목 리스트)
     """
     recommended: List[AnalystItem] = []
     warning: List[AnalystItem] = []
     recommended.extend(_fetch_founders_fund())
+    recommended.extend(_fetch_dart(dart_api_key))
     recommended.extend(_fetch_privateshare_stub())
     if api_key:
         rec, warn = _fetch_rss_filtered(api_key)
@@ -55,6 +59,26 @@ def _fetch_founders_fund() -> List[AnalystItem]:
             reason="Founders Fund 포트폴리오 편입",
             source="Founders Fund",
         ))
+    return items
+
+
+def _fetch_dart(api_key: Optional[str]) -> List[AnalystItem]:
+    """DART 전자공시 - 최근 공시 종목."""
+    if not api_key:
+        return []
+    from .dart_source import fetch_recent_disclosures
+
+    items: List[AnalystItem] = []
+    try:
+        for d in fetch_recent_disclosures(api_key, days=3)[:15]:
+            items.append(AnalystItem(
+                name=d.corp_name,
+                ticker=d.stock_code,
+                reason=d.report_nm[:150],
+                source="DART 공시",
+            ))
+    except Exception:
+        pass
     return items
 
 

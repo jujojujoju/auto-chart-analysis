@@ -271,51 +271,56 @@ def filter_rss_with_gemini(
     return out
 
 
+def _parse_json_array_robust(text: str) -> list:
+    """JSON 배열 파싱. 실패 시 trailing comma 제거 등 시도."""
+    text = text.strip().replace("```json", "").replace("```", "").strip()
+    start = text.find("[")
+    if start < 0:
+        return []
+    end = text.rfind("]") + 1
+    if end <= start:
+        return []
+    raw = text[start:end]
+    for attempt in [raw, raw.replace(",]", "]").replace(",}", "}")]:
+        try:
+            return json.loads(attempt)
+        except json.JSONDecodeError:
+            continue
+    return []
+
+
 def get_hottest_analyst_analyses(
     rss_texts: list[str],
     api_key: Optional[str],
 ) -> list[dict]:
-    """RSS에서 최근 가장 핫한 애널리스트 분석 10건. 미국·한국 둘 다 포함.
-
-    Returns:
-        [{"ticker":"AAPL","name":"Apple","analysis":"...","source":"Finviz"}, ...]
-    """
+    """RSS에서 최근 가장 핫한 애널리스트 분석 10건. 미국·한국 둘 다 포함."""
     if not rss_texts or not api_key or not HAS_GENAI:
         return []
 
     _ensure_genai(api_key)
     model = genai.GenerativeModel(MODEL_NAME)
-
     block = "\n".join(rss_texts[:80])
 
-    prompt = f"""아래는 금융 뉴스/애널리스트 RSS 헤드라인입니다.
-가장 화제·핫한 애널리스트 분석 10건을 선별하세요. 미국주·한국주 모두 포함.
-
-미국주: AAPL, PLTR, TSLA 등 (yfinance 티커 그대로)
-한국주: 005930.KS, 035720.KS 등 (6자리+.KS 또는 .KQ)
-
-각 종목별로 티커, 종목명, 애널리스트 의견 요약(1~2문장), 출처를 추출.
+    prompt = f"""아래 RSS 헤드라인에서 가장 화제인 종목 10개를 골라, 티커·종목명·요약·출처를 주세요.
+미국주(AAPL,TSLA 등), 한국주(005930.KS 등) 모두 포함.
 
 [헤드라인]
 {block}
 
-JSON 배열만 출력 (다른 텍스트 없이):
-[{{"ticker":"AAPL","name":"Apple","analysis":"요약","source":"Finviz"}}, ...]
-반드시 10개 출력. 미국주와 한국주를 골고루 포함."""
+아래 형식의 JSON 배열만 출력:
+[{{"ticker":"AAPL","name":"Apple","analysis":"한줄요약","source":"Finviz"}}, ...]
+10개 출력."""
 
     try:
         resp = model.generate_content(
             prompt,
-            generation_config=genai.types.GenerationConfig(temperature=0.2, max_output_tokens=2048),
+            generation_config=genai.types.GenerationConfig(
+                temperature=0.2,
+                max_output_tokens=2048,
+            ),
         )
-        text = (resp.text or "").strip().replace("```json", "").replace("```", "")
-        start = text.find("[")
-        if start < 0:
-            return []
-        end = text.rfind("]") + 1
-        if end <= start:
-            return []
-        arr = json.loads(text[start:end])
+        text = (resp.text or "").strip()
+        arr = _parse_json_array_robust(text)
         out = []
         seen = set()
         for x in (arr or []):

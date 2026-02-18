@@ -23,6 +23,7 @@ TELEGRAM_CHAT_ID = get_env("TELEGRAM_CHAT_ID")
 
 # 선택 (없으면 해당 수집기 스킵)
 YOUTUBE_API_KEY = get_env("YOUTUBE_API_KEY")
+DART_API_KEY = get_env("DART_API_KEY")  # opendart.fss.or.kr 인증키
 
 # 경로
 DATA_DIR = PROJECT_ROOT / "data"

@@ -24,6 +24,7 @@ from config.settings import (
     SAMPLE_DIR,
     OUTPUT_DIR,
     CACHE_DIR,
+    DART_API_KEY,
 )
 from src.data.kr_universe import fetch_kr_tickers_with_cache
 from src.data.market_data import fetch_ohlcv_cached
@@ -77,16 +78,26 @@ def run():
 
     print(f"  처리 완료: {len(charts)}개 종목")
 
+    # 2b. 애널리스트 정보 수집 (Founders Fund, DART, 키움, RSS/Gemini 필터)
+    print("\n[2b/5] 애널리스트 소스 수집...")
+    analyst_recommended, analyst_warning = fetch_all_analyst_items(
+        api_key=GEMINI_API_KEY,
+        dart_api_key=DART_API_KEY,
+    )
+
     # 2a. 최근 핫한 애널리스트 분석 Top 10 (미국·한국)
     top10_hot: list = []
-    if GEMINI_API_KEY:
-        rss_items = fetch_all_rss_items()
-        rss_texts = [f"[{r.source}] {r.title} | {r.summary[:150]}" for r in rss_items]
+    rss_items = fetch_all_rss_items()
+    rss_texts = [f"[{r.source}] {r.title} | {r.summary[:150]}" for r in rss_items]
+    if GEMINI_API_KEY and rss_texts:
         top10_hot = get_hottest_analyst_analyses(rss_texts, GEMINI_API_KEY)
-
-    # 2b. 애널리스트 정보 수집 (Founders Fund + RSS/Gemini 필터)
-    print("\n[2b/5] 애널리스트 소스 수집...")
-    analyst_recommended, analyst_warning = fetch_all_analyst_items(api_key=GEMINI_API_KEY)
+    # fallback: 핫한 Top 10 실패 시 추천+위험신호에서 10건 채우기
+    if not top10_hot:
+        combined = [
+            {"ticker": a.ticker, "name": a.name, "analysis": a.reason, "source": a.source}
+            for a in (analyst_recommended + analyst_warning)[:10]
+        ]
+        top10_hot = combined
     print("  추천:", len(analyst_recommended), "건 / 위험신호:", len(analyst_warning), "건")
 
     # 3. Intelligence: 1회 호출로 전체 차트 분석

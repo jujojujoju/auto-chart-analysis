@@ -44,6 +44,23 @@ def fetch_naver_economy() -> List[RssItem]:
     return _parse_rss(url, "Naver Economy")
 
 
+def fetch_kiwoom_research() -> List[RssItem]:
+    """키움증권 리서치 게시판 (크롤링)."""
+    try:
+        from .kiwoom_research import crawl_kiwoom_research
+        items: List[RssItem] = []
+        for k in crawl_kiwoom_research():
+            items.append(RssItem(
+                title=k.title,
+                summary="",
+                link=k.link,
+                source="키움증권 리서치",
+            ))
+        return items
+    except Exception:
+        return []
+
+
 def _parse_rss(url: str, source: str) -> List[RssItem]:
     """feedparser 또는 fallback으로 RSS 파싱."""
     try:
@@ -98,4 +115,5 @@ def fetch_all_rss_items() -> List[RssItem]:
     items.extend(fetch_finviz_news())
     items.extend(fetch_seeking_alpha())
     items.extend(fetch_naver_economy())
+    items.extend(fetch_kiwoom_research())
     return items
