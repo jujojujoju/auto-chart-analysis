@@ -30,12 +30,11 @@ from src.data.market_data import fetch_ohlcv_cached
 from src.data.analyst_sources import fetch_all_analyst_items
 from src.logic.ohlcv_processor import process_ohlcv_to_json
 from src.logic.chart_compress import compress_all_charts
-from src.logic.volume_rank import get_top_by_buying_pressure
 from src.data.rss_sources import fetch_all_rss_items
 from src.intelligence.gemini_analyzer import (
     load_sample_charts,
     analyze_all_charts_single_call,
-    analyze_top_stocks_with_rss,
+    get_hottest_analyst_analyses,
 )
 from src.delivery.telegram_notifier import send_telegram
 
@@ -78,15 +77,12 @@ def run():
 
     print(f"  처리 완료: {len(charts)}개 종목")
 
-    # 2a. 매수세 Top 10 + 애널리스트 분석
-    top10 = get_top_by_buying_pressure(charts, ticker_names, n=10)
-    top10_analysis: list = []
-    if top10 and GEMINI_API_KEY:
+    # 2a. 최근 핫한 애널리스트 분석 Top 10 (미국·한국)
+    top10_hot: list = []
+    if GEMINI_API_KEY:
         rss_items = fetch_all_rss_items()
         rss_texts = [f"[{r.source}] {r.title} | {r.summary[:150]}" for r in rss_items]
-        top10_analysis = analyze_top_stocks_with_rss(top10, rss_texts, GEMINI_API_KEY)
-    if not top10_analysis and top10:
-        top10_analysis = [{"ticker": t, "name": n, "analysis": "RSS 언급 없음 (거래량 상위)"} for t, n in top10]
+        top10_hot = get_hottest_analyst_analyses(rss_texts, GEMINI_API_KEY)
 
     # 2b. 애널리스트 정보 수집 (Founders Fund + RSS/Gemini 필터)
     print("\n[2b/5] 애널리스트 소스 수집...")
@@ -156,13 +152,14 @@ def run():
     else:
         msg_parts.append("없음\n")
 
-    # -- 매수세 Top 10 애널리스트 분석 --
-    msg_parts.append("\n<b>-- 매수세 Top 10 애널리스트 분석 --</b>\n")
-    if top10_analysis:
-        for i, a in enumerate(top10_analysis[:10], 1):
+    # -- 최근 핫한 애널리스트 분석 Top 10 (미국·한국) --
+    msg_parts.append("\n<b>-- 최근 핫한 애널리스트 분석 Top 10 --</b>\n")
+    if top10_hot:
+        for i, a in enumerate(top10_hot[:10], 1):
+            src = a.get("source", "")
             msg_parts.append(
-                "%d. %s (%s): %s\n"
-                % (i, a.get("name", "?"), a.get("ticker", "?"), _esc(a.get("analysis", ""))[:180])
+                "%d. %s (%s): %s  출처:%s\n"
+                % (i, a.get("name", "?"), a.get("ticker", "?"), _esc(a.get("analysis", ""))[:150], src)
             )
     else:
         msg_parts.append("분석 없음\n")
@@ -190,7 +187,7 @@ def run():
             {"name": a.name, "ticker": a.ticker, "reason": a.reason, "source": a.source}
             for a in analyst_warning
         ],
-        "top10_buying_pressure": top10_analysis,
+        "top10_hot_analyst": top10_hot,
         "api_error": api_error_msg,
     }
     with open(OUTPUT_DIR / "daily_report.json", "w", encoding="utf-8") as f:

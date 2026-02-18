@@ -271,43 +271,42 @@ def filter_rss_with_gemini(
     return out
 
 
-def analyze_top_stocks_with_rss(
-    top_tickers: list[tuple[str, str]],
+def get_hottest_analyst_analyses(
     rss_texts: list[str],
     api_key: Optional[str],
 ) -> list[dict]:
-    """매수세 Top 10 종목에 대한 애널리스트 분석. RSS 헤드라인 기반.
+    """RSS에서 최근 가장 핫한 애널리스트 분석 10건. 미국·한국 둘 다 포함.
 
     Returns:
-        [{"ticker":"005930.KS","name":"삼성전자","analysis":"..."}, ...]
+        [{"ticker":"AAPL","name":"Apple","analysis":"...","source":"Finviz"}, ...]
     """
-    if not top_tickers or not rss_texts or not api_key or not HAS_GENAI:
+    if not rss_texts or not api_key or not HAS_GENAI:
         return []
 
     _ensure_genai(api_key)
     model = genai.GenerativeModel(MODEL_NAME)
 
-    ticker_list = "\n".join(f"- {t} ({n})" for t, n in top_tickers)
-    block = "\n".join(rss_texts[:60])
+    block = "\n".join(rss_texts[:80])
 
-    prompt = f"""아래는 거래량(매수세) 상위 10종목입니다. 반드시 10개 모두 출력하세요.
-{ticker_list}
+    prompt = f"""아래는 금융 뉴스/애널리스트 RSS 헤드라인입니다.
+가장 화제·핫한 애널리스트 분석 10건을 선별하세요. 미국주·한국주 모두 포함.
 
-아래 RSS 헤드라인에서 각 종목(티커 또는 종목명)이 언급되면 애널리스트 의견을 1~2문장 요약.
-RSS에 언급이 없으면 analysis에 "RSS 언급 없음 (거래량 집중)" 이라고만 적으세요.
-RSS는 주로 미국주 위주이므로 한국주(005930.KS 등)는 대부분 "RSS 언급 없음"일 수 있습니다.
+미국주: AAPL, PLTR, TSLA 등 (yfinance 티커 그대로)
+한국주: 005930.KS, 035720.KS 등 (6자리+.KS 또는 .KQ)
+
+각 종목별로 티커, 종목명, 애널리스트 의견 요약(1~2문장), 출처를 추출.
 
 [헤드라인]
 {block}
 
 JSON 배열만 출력 (다른 텍스트 없이):
-[{{"ticker":"005930.KS","name":"삼성전자","analysis":"요약"}}, ...]
-"""
+[{{"ticker":"AAPL","name":"Apple","analysis":"요약","source":"Finviz"}}, ...]
+반드시 10개 출력. 미국주와 한국주를 골고루 포함."""
 
     try:
         resp = model.generate_content(
             prompt,
-            generation_config=genai.types.GenerationConfig(temperature=0.1, max_output_tokens=2048),
+            generation_config=genai.types.GenerationConfig(temperature=0.2, max_output_tokens=2048),
         )
         text = (resp.text or "").strip().replace("```json", "").replace("```", "")
         start = text.find("[")
@@ -327,15 +326,12 @@ JSON 배열만 출력 (다른 텍스트 없이):
                     out.append({
                         "ticker": t,
                         "name": str(x.get("name", t)).strip() or t,
-                        "analysis": str(x.get("analysis", ""))[:250] or "RSS 언급 없음",
+                        "analysis": str(x.get("analysis", ""))[:250],
+                        "source": str(x.get("source", ""))[:30] or "RSS",
                     })
-        # 부족한 ticker는 top_tickers에서 채우기
-        for t, n in top_tickers:
-            if t not in seen:
-                out.append({"ticker": t, "name": n, "analysis": "RSS 언급 없음 (거래량 상위)"})
         return out[:10]
     except Exception:
-        return [{"ticker": t, "name": n, "analysis": "RSS 언급 없음 (거래량 상위)"} for t, n in top_tickers[:10]]
+        return []
 
 
 def parse_gemini_response(text: str) -> dict:
