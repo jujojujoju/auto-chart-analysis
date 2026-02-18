@@ -75,9 +75,9 @@ def run():
 
     print(f"  처리 완료: {len(charts)}개 종목")
 
-    # 2b. 애널리스트 정보 수집
+    # 2b. 애널리스트 정보 수집 (Founders Fund + RSS/Gemini 필터)
     print("\n[2b/5] 애널리스트 소스 수집...")
-    analyst_items = fetch_all_analyst_items()
+    analyst_items = fetch_all_analyst_items(api_key=GEMINI_API_KEY)
     print("  수집:", len(analyst_items), "건")
 
     # 3. Intelligence: 1회 호출로 전체 차트 분석

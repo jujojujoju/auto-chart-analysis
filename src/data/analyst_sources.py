@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
-"""해외·한국 애널리스트/펀드 분석 정보 수집.
+"""해외·한국 애널리스트/펀드/RSS 분석 정보 수집.
 
 - Founders Fund 포트폴리오
-- 확장 가능: 프라이빗쉐어 펀드, 애널리스트 사이트, 유튜버 등
+- Finviz, Seeking Alpha, Naver RSS → Gemini 필터 (Strong Buy, 목표가 상향 등)
 """
 
 from dataclasses import dataclass
-from typing import List
+from typing import List, Optional
 
 
 @dataclass
@@ -15,14 +15,18 @@ class AnalystItem:
     name: str       # 종목명
     ticker: str     # 심볼 (005930.KS, PLTR 등)
     reason: str     # 근거
-    source: str     # 출처 (Founders Fund, 유튜버 등)
+    source: str     # 출처 (Founders Fund, Finviz, Seeking Alpha 등)
 
 
-def fetch_all_analyst_items() -> List[AnalystItem]:
-    """모든 애널리스트 소스에서 수집."""
+def fetch_all_analyst_items(api_key: Optional[str] = None) -> List[AnalystItem]:
+    """모든 애널리스트 소스에서 수집.
+    api_key 있으면 RSS + Gemini 필터링 포함.
+    """
     items: List[AnalystItem] = []
     items.extend(_fetch_founders_fund())
-    items.extend(_fetch_privateshare_stub())  # TODO: 실제 크롤링 연결
+    items.extend(_fetch_privateshare_stub())
+    if api_key:
+        items.extend(_fetch_rss_filtered(api_key))
     return items
 
 
@@ -41,7 +45,6 @@ def _fetch_founders_fund() -> List[AnalystItem]:
         ticker = COMPANY_TO_TICKER.get(name, "")
         if not ticker or not ticker.strip():
             continue
-        # 미국주는 .붙이지 않음, 한국주는 .KS/.KQ
         sym = ticker if "." in ticker else ticker
         items.append(AnalystItem(
             name=name,
@@ -53,6 +56,31 @@ def _fetch_founders_fund() -> List[AnalystItem]:
 
 
 def _fetch_privateshare_stub() -> List[AnalystItem]:
-    """프라이빗쉐어 펀드 (추후 실제 API/크롤링 연결)."""
-    # TODO: 프라이빗쉐어 펀드 공개 포트폴리오가 있다면 크롤링
+    """프라이빗쉐어 펀드 (추후 연결)."""
     return []
+
+
+def _fetch_rss_filtered(api_key: str) -> List[AnalystItem]:
+    """RSS 수집 후 Gemini로 필터링."""
+    from .rss_sources import fetch_all_rss_items
+    from ..intelligence.gemini_analyzer import filter_rss_with_gemini
+
+    items: List[AnalystItem] = []
+    try:
+        rss_items = fetch_all_rss_items()
+        if not rss_items:
+            return items
+        texts = [f"[{r.source}] {r.title} | {r.summary[:200]}" for r in rss_items]
+        filtered = filter_rss_with_gemini(texts, api_key)
+        for x in filtered:
+            ticker = x.get("ticker", "").strip()
+            if ticker:
+                items.append(AnalystItem(
+                    name=x.get("name", ticker),
+                    ticker=ticker,
+                    reason=x.get("reason", "")[:200],
+                    source=x.get("source", "RSS")[:50],
+                ))
+    except Exception:
+        pass
+    return items
