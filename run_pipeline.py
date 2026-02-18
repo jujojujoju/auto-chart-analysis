@@ -86,7 +86,7 @@ def run():
         rss_texts = [f"[{r.source}] {r.title} | {r.summary[:150]}" for r in rss_items]
         top10_analysis = analyze_top_stocks_with_rss(top10, rss_texts, GEMINI_API_KEY)
     if not top10_analysis and top10:
-        top10_analysis = [{"ticker": t, "name": n, "analysis": "RSS 분석 대기"} for t, n in top10]
+        top10_analysis = [{"ticker": t, "name": n, "analysis": "RSS 언급 없음 (거래량 상위)"} for t, n in top10]
 
     # 2b. 애널리스트 정보 수집 (Founders Fund + RSS/Gemini 필터)
     print("\n[2b/5] 애널리스트 소스 수집...")

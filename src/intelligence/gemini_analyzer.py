@@ -287,27 +287,29 @@ def analyze_top_stocks_with_rss(
     _ensure_genai(api_key)
     model = genai.GenerativeModel(MODEL_NAME)
 
-    ticker_str = ", ".join(f"{t} ({n})" for t, n in top_tickers)
+    ticker_list = "\n".join(f"- {t} ({n})" for t, n in top_tickers)
     block = "\n".join(rss_texts[:60])
 
-    prompt = f"""아래는 거래량(매수세) 상위 10종목입니다: {ticker_str}
+    prompt = f"""아래는 거래량(매수세) 상위 10종목입니다. 반드시 10개 모두 출력하세요.
+{ticker_list}
 
-아래 RSS 헤드라인에서 위 종목들이 언급된 경우, 해당 종목에 대한 애널리스트 의견·분석을 1~2문장으로 요약하세요.
-언급이 없으면 "최근 RSS 언급 없음"으로 표시.
+아래 RSS 헤드라인에서 각 종목(티커 또는 종목명)이 언급되면 애널리스트 의견을 1~2문장 요약.
+RSS에 언급이 없으면 analysis에 "RSS 언급 없음 (거래량 집중)" 이라고만 적으세요.
+RSS는 주로 미국주 위주이므로 한국주(005930.KS 등)는 대부분 "RSS 언급 없음"일 수 있습니다.
 
 [헤드라인]
 {block}
 
-JSON 배열만 출력:
+JSON 배열만 출력 (다른 텍스트 없이):
 [{{"ticker":"005930.KS","name":"삼성전자","analysis":"요약"}}, ...]
 """
 
     try:
         resp = model.generate_content(
             prompt,
-            generation_config=genai.types.GenerationConfig(temperature=0.2, max_output_tokens=2048),
+            generation_config=genai.types.GenerationConfig(temperature=0.1, max_output_tokens=2048),
         )
-        text = (resp.text or "").strip()
+        text = (resp.text or "").strip().replace("```json", "").replace("```", "")
         start = text.find("[")
         if start < 0:
             return []
@@ -316,16 +318,24 @@ JSON 배열만 출력:
             return []
         arr = json.loads(text[start:end])
         out = []
+        seen = set()
         for x in (arr or []):
             if isinstance(x, dict) and x.get("ticker"):
-                out.append({
-                    "ticker": str(x.get("ticker", "")).strip(),
-                    "name": str(x.get("name", x.get("ticker", ""))).strip(),
-                    "analysis": str(x.get("analysis", ""))[:250],
-                })
+                t = str(x.get("ticker", "")).strip()
+                if t and t not in seen:
+                    seen.add(t)
+                    out.append({
+                        "ticker": t,
+                        "name": str(x.get("name", t)).strip() or t,
+                        "analysis": str(x.get("analysis", ""))[:250] or "RSS 언급 없음",
+                    })
+        # 부족한 ticker는 top_tickers에서 채우기
+        for t, n in top_tickers:
+            if t not in seen:
+                out.append({"ticker": t, "name": n, "analysis": "RSS 언급 없음 (거래량 상위)"})
         return out[:10]
     except Exception:
-        return []
+        return [{"ticker": t, "name": n, "analysis": "RSS 언급 없음 (거래량 상위)"} for t, n in top_tickers[:10]]
 
 
 def parse_gemini_response(text: str) -> dict:
