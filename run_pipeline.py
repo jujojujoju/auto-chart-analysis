@@ -44,22 +44,33 @@ BATCH_SIZE = 10
 GEMINI_SLEEP_SEC = 12
 
 
+def _load_one(symbol: str, cache_dir: Path) -> dict | None:
+    """단일 종목 OHLCV 로드 + 지표. 실패 시 None."""
+    try:
+        df = fetch_ohlcv_cached(symbol, cache_dir, max_days=OHLCV_DAYS)
+        df = add_technical_indicators(df)
+        df = add_sma_50_100_200(df)
+        ch = process_ohlcv_to_json(df, symbol, add_indicators=False)
+        ch["ohlcv"] = df.to_dict(orient="index")
+        ch["_df"] = df
+        return ch
+    except Exception:
+        return None
+
+
 def _load_ohlcv_charts(tickers: list, ticker_names: dict, cache_dir: Path, max_workers: int = 16) -> list:
-    """티커 리스트에 대해 OHLCV 3년치 로드 + 기술적지표(50/100/200 포함) 적용."""
+    """티커 리스트에 대해 OHLCV 3년치 로드 + 기술적지표(50/100/200 포함) 적용. 병렬 처리."""
     charts = []
-    for i, symbol in enumerate(tickers):
-        try:
-            df = fetch_ohlcv_cached(symbol, cache_dir, max_days=OHLCV_DAYS)
-            df = add_technical_indicators(df)
-            df = add_sma_50_100_200(df)
-            ch = process_ohlcv_to_json(df, symbol, add_indicators=False)
-            ch["ohlcv"] = df.to_dict(orient="index")
-            ch["_df"] = df  # 규칙 필터/차트점수용
-            charts.append(ch)
-        except Exception:
-            continue
-        if (i + 1) % 100 == 0:
-            print("  OHLCV 로드:", i + 1, "/", len(tickers))
+    done = 0
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        futures = {ex.submit(_load_one, sym, cache_dir): sym for sym in tickers}
+        for f in as_completed(futures):
+            done += 1
+            if done % 200 == 0:
+                print("  OHLCV 로드:", done, "/", len(tickers))
+            r = f.result()
+            if r is not None:
+                charts.append(r)
     return charts
 
 
