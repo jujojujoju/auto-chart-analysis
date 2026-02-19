@@ -8,8 +8,8 @@
 python scripts/generate_answer_samples.py
 ```
 
-생성 파일: 카카오(035720.KS), 네이버(035420.KS), 다올투자증권(030210.KS), CJ CGV(079160.KS)  
-→ `samples/answer_kakao.json`, `answer_naver.json`, `answer_daol.json`, `answer_cj_cgv.json`
+생성 파일: 카카오(035720.KS), 네이버(035420.KS), 다올투자증권(030210.KS), CJ CGV(079160.KS), LG전자(066570.KS), HMM(011200.KS)  
+→ `answer_kakao.json`, `answer_naver.json`, `answer_daol.json`, `answer_cj_cgv.json`, `answer_lg_electronics.json`, `answer_hmm.json`
 
 ## 패턴 설명 (코드 내 고정)
 

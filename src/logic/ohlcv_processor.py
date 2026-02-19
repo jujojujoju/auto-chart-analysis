@@ -23,12 +23,13 @@ def add_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
     if not HAS_TA:
         return out
 
-    # 이평선
-    for window in [5, 20, 60]:
+    # 이평선 (5, 20, 60 + 50, 100, 200)
+    for window in [5, 20, 50, 60, 100, 200]:
         sma = SMAIndicator(close=df["Close"], window=window)
         out[f"sma_{window}"] = sma.sma_indicator()
-        ema = EMAIndicator(close=df["Close"], window=window)
-        out[f"ema_{window}"] = ema.ema_indicator()
+        if window <= 60:
+            ema = EMAIndicator(close=df["Close"], window=window)
+            out[f"ema_{window}"] = ema.ema_indicator()
 
     # RSI
     rsi = RSIIndicator(close=df["Close"], window=14)

@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""정답 차트 4종목 샘플 JSON 생성.
+"""정답 차트 샘플 JSON 생성.
 
 실행: python scripts/generate_answer_samples.py
 생성 위치: samples/
-- 카카오(035720.KS), 네이버(035420.KS), 다올투자증권(030210.KS), CJ CGV(079160.KS)
-- 2021.07~ 일봉 + 기술적지표
+- 카카오, 네이버, 다올투자증권, CJ CGV, LG전자(066570.KS), HMM(011200.KS)
+- 5년 일봉 + 기술적지표
 """
 
 import json
@@ -21,9 +21,11 @@ from src.logic.ohlcv_processor import process_ohlcv_to_json
 # 정답 차트: (yfinance symbol, 저장 파일명)
 ANSWER_CHARTS = [
     ("035720.KS", "kakao"),           # 카카오
-    ("035420.KS", "naver"),          # 네이버
-    ("030210.KS", "daol"),           # 다올투자증권
-    ("079160.KS", "cj_cgv"),         # CJ CGV
+    ("035420.KS", "naver"),           # 네이버
+    ("030210.KS", "daol"),            # 다올투자증권
+    ("079160.KS", "cj_cgv"),          # CJ CGV
+    ("066570.KS", "lg_electronics"),  # LG전자
+    ("011200.KS", "hmm"),             # HMM
 ]
 
 def main():

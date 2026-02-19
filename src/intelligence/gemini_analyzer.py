@@ -160,11 +160,13 @@ def analyze_all_charts_single_call(
     system = _build_system_prompt(samples)
 
     user_content = f"""
-[분석 대상 - 아래 각 줄은 "symbol 이름: C=현재가 s5=sma5 s20=sma20 s60=sma60 rsi=RSI v=거래량 | 10d=최근10일종가" 형식입니다]
+[분석 대상 - 아래 각 줄은 정규화된 데이터입니다. 절대 가격이 아니라 이격도·변동률로 표기]
+- symbol 이름: C/s20=종가/20일선비율 C/s60=종가/60일선비율 rsi=RSI | 10d_pct=[전일대비 변동률%] 10d_c/s20=[종가/20일선 비율 시계열]
+- 1.0 = 이평선 위, 1.05 = 5% 위, 0.95 = 5% 아래. 이격도가 너무 벌어진(예: 1.2 이상) 종목은 부적합.
 {compressed_text}
 
 위 모든 종목을 검토하여, [참고 정답 패턴]에 부합하는 종목만 선별하세요.
-(하락/횡보 오래 하다가 갑자기 튀었다가 0.3~0.6 되돌림 후 횡보, 저점 상승이 최근 1번 이하인 "역배열→정배열 전환 초입"만 적합. 이미 정배열 오래 유지·저점 상승 여러 번 반복된 종목은 부적합)
+(하락/횡보 오래 하다가 갑자기 튀었다가 0.3~0.6 되돌림 후 횡보, 저점 상승이 최근 1번 이하인 "역배열→정배열 전환 초입"만 적합. 이미 정배열 오래 유지·이격도 과대·저점 상승 여러 번 반복된 종목은 부적합)
 
 아래 형식으로만 답하세요. 적합 종목이 없으면 "적합 없음"만 출력.
 
@@ -361,3 +363,140 @@ def parse_gemini_response(text: str) -> dict:
     if not out["reason"] and t:
         out["reason"] = t[:200].replace("\n", " ")
     return out
+
+
+# --- 퀀트 전문가 배치 스코어링 (RPD 20 / RPM 5 대응) ---
+
+QUANT_SYSTEM_PROMPT = """당신은 퀀트 기반 투자 분석 전문가입니다. 감정 배제, 수치·공식 기반으로만 판단합니다.
+
+스코어 공식:
+1. 목표가 괴리율(Gap) 30%: (목표가 - 현재가) / 현재가 × 100. 괴리 20% 이상이면 높은 점수.
+2. 재무 건전성(Fundamental) 40%: 영업이익률(OPM) 10% 이상 또는 최근 분기 흑자 전환 시 가산.
+3. 시장 심리(Sentiment) 30%: '역대급', 'Strong Buy', '상향', '매수' 등 긍정 단어 포함 시 가산.
+
+각 종목에 대해 위 세 항목을 점수화(0~100)하고, 가중합으로 최종 Score를 계산한 뒤, 상위 종목만 선별하세요. 근거를 반드시 포함하세요."""
+
+
+def batch_stock_analysis_with_scores(
+    stocks_data_list: list[dict],
+    api_key: Optional[str],
+    batch_size: int = 10,
+    sleep_sec: float = 12.0,
+    market_label: str = "US",
+) -> tuple[list[dict], Optional[str]]:
+    """한 번에 batch_size개 종목 데이터를 Gemini에 보내 스코어·근거 수집. RPD 절약용.
+    stocks_data_list: [{"ticker","name","current_price","target_price","opm_pct","headlines":[]}, ...]
+    Returns: (top 10 list with score/reason, error_msg)
+    """
+    import time
+    if not HAS_GENAI or not api_key or not stocks_data_list:
+        return [], None
+    _ensure_genai(api_key)
+    model = genai.GenerativeModel(MODEL_NAME)
+    results: list[dict] = []
+    err_msg: Optional[str] = None
+    for i in range(0, len(stocks_data_list), batch_size):
+        batch = stocks_data_list[i : i + batch_size]
+        block = []
+        for s in batch:
+            gap = ""
+            if s.get("current_price") and s.get("target_price"):
+                try:
+                    g = (float(s["target_price"]) - float(s["current_price"])) / float(s["current_price"]) * 100
+                    gap = f"목표가괴리율={g:.1f}%"
+                except (TypeError, ZeroDivisionError):
+                    pass
+            block.append(
+                "[%s] %s | 현재가=%s 목표가=%s %s | OPM=%s%% | 헤드라인/리포트=%s"
+                % (
+                    s.get("ticker", "?"),
+                    s.get("name", "?"),
+                    s.get("current_price"),
+                    s.get("target_price"),
+                    gap,
+                    s.get("opm_pct"),
+                    str((s.get("headlines") or s.get("seeking_alpha_headlines") or s.get("headlines_or_reports"))[:5]),
+                )
+            )
+        user = f"""[{market_label} 후보 종목 데이터 - 이미 계산된 수치 포함]
+{chr(10).join(block)}
+
+위 데이터를 바탕으로 Score = Gap 30% + Fundamental 40% + Sentiment 30% 로 점수화하고, 상위 10개만 골라 주세요.
+각 종목마다 한 줄: ticker | name | Score(0~100) | 근거(한 줄). JSON 배열로만 출력:
+[{{"ticker":"AAPL","name":"Apple","score":85,"reason":"괴리 25% 가산, OPM 15%"}}, ...]"""
+        try:
+            resp = model.generate_content(
+                QUANT_SYSTEM_PROMPT + "\n\n" + user,
+                generation_config=genai.types.GenerationConfig(temperature=0.2, max_output_tokens=2048),
+            )
+            text = (resp.text or "").strip()
+            arr = _parse_json_array_robust(text)
+            for x in (arr or []):
+                if isinstance(x, dict) and x.get("ticker"):
+                    results.append({
+                        "ticker": str(x.get("ticker", "")).strip(),
+                        "name": str(x.get("name", x.get("ticker", ""))).strip(),
+                        "score": int(x.get("score", 0)) if x.get("score") is not None else 0,
+                        "reason": str(x.get("reason", ""))[:300],
+                        "market": market_label,
+                    })
+        except Exception as e:
+            err_msg = str(e)
+            if "429" in err_msg or "resource_exhausted" in err_msg.lower():
+                break
+        if i + batch_size < len(stocks_data_list):
+            time.sleep(sleep_sec)
+    results.sort(key=lambda x: -x.get("score", 0))
+    return results[:10], err_msg
+
+
+def batch_chart_analysis_top10(
+    charts_summary_list: list[dict],
+    api_key: Optional[str],
+    batch_size: int = 10,
+    sleep_sec: float = 12.0,
+    market_label: str = "US",
+) -> tuple[list[dict], Optional[str]]:
+    """차트 요약(50/100/200 정배열, 골드크로스, 이격도, RSI) 배치로 Gemini에 보내 상위 10개 선별."""
+    import time
+    if not HAS_GENAI or not api_key or not charts_summary_list:
+        return [], None
+    _ensure_genai(api_key)
+    model = genai.GenerativeModel(MODEL_NAME)
+    block = "\n".join(
+        "[%s] %s | 정배열=%s 골드크로스=%s 이격도200=%s RSI=%s"
+        % (
+            c.get("symbol", "?"),
+            c.get("name", "?"),
+            c.get("alignment_50_100_200"),
+            c.get("golden_cross_50_200"),
+            c.get("displacement_200"),
+            c.get("rsi"),
+        )
+        for c in charts_summary_list
+    )
+    user = f"""[{market_label} 차트 후보 - 50/100/200 이평선 정배열·골든크로스·200이격도·RSI]
+{block}
+
+조건: 50>100>200 정배열, 골든크로스, 200이평 이격도 적정, 정배열인데 RSI 30 이하 우선. 정답 차트와 유사한 패턴 우선.
+상위 10개만 골라 한 줄씩: symbol | name | 근거(한 줄). JSON 배열만:
+[{{"symbol":"005930.KS","name":"삼성전자","reason":"정배열+골드크로스, 이격도 1.02"}}, ...]"""
+    try:
+        resp = model.generate_content(
+            PATTERN_DESCRIPTION + "\n\n" + user,
+            generation_config=genai.types.GenerationConfig(temperature=0.2, max_output_tokens=2048),
+        )
+        text = (resp.text or "").strip()
+        arr = _parse_json_array_robust(text)
+        results = []
+        for x in (arr or []):
+            if isinstance(x, dict) and x.get("symbol"):
+                results.append({
+                    "symbol": str(x.get("symbol", "")).strip(),
+                    "name": str(x.get("name", x.get("symbol", ""))).strip(),
+                    "reason": str(x.get("reason", ""))[:300],
+                    "market": market_label,
+                })
+        return results[:10], None
+    except Exception as e:
+        return [], str(e)

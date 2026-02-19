@@ -25,6 +25,9 @@ TELEGRAM_CHAT_ID = get_env("TELEGRAM_CHAT_ID")
 YOUTUBE_API_KEY = get_env("YOUTUBE_API_KEY")
 DART_API_KEY = get_env("DART_API_KEY")  # opendart.fss.or.kr 인증키
 
+# 차트 패턴: True면 Gemini 대신 규칙 기반 매처만 사용 (API 비용/효율)
+USE_RULE_BASED_PATTERN = (get_env("USE_RULE_BASED_PATTERN", "").lower() in ("1", "true", "yes"))
+
 # 경로
 DATA_DIR = PROJECT_ROOT / "data"
 SAMPLE_DIR = PROJECT_ROOT / "samples"  # 10개 정답 샘플
