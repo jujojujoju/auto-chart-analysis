@@ -5,8 +5,12 @@
 """
 
 import json
+import logging
+import re
 from pathlib import Path
 from typing import Any, Optional
+
+PIPELINE_LOG = "pipeline"  # run_pipeline에서 설정한 로거와 동일
 
 try:
     import google.generativeai as genai
@@ -15,8 +19,42 @@ except ImportError:
     HAS_GENAI = False
 
 
-# Gemini (무료 티어) - list_models()로 확인된 사용 가능 모델 사용
+# 2.5-flash, 2.5-flash-lite만 시도. 둘 다 429면 Gemini 호출 중단 → run_pipeline에서 괴리·OPM/규칙 기준으로만 추천
 MODEL_NAME = "gemini-2.5-flash"
+MODEL_FALLBACKS = ["gemini-2.5-flash-lite"]
+ALLOWED_MODELS = ("gemini-2.5-flash", "gemini-2.5-flash-lite")
+
+# 마지막으로 성공한 모델 저장 경로. 있으면 다음 실행부터 해당 모델만 사용(재시도 없음)
+_GEMINI_MODEL_CACHE_FILE = Path(__file__).resolve().parent.parent.parent / "cache" / "last_gemini_model.txt"
+
+
+def _load_last_working_model() -> Optional[str]:
+    """캐시에 저장된 마지막 성공 모델명 반환. 없거나 비정상이면 None."""
+    try:
+        if _GEMINI_MODEL_CACHE_FILE.exists():
+            with open(_GEMINI_MODEL_CACHE_FILE, encoding="utf-8") as f:
+                name = f.read().strip()
+            if name and name.startswith("gemini-"):
+                return name
+    except Exception:
+        pass
+    return None
+
+
+def _save_last_working_model(model_name: str) -> None:
+    """성공한 모델명을 캐시에 저장. 다음 실행부터 이 모델만 사용."""
+    try:
+        _GEMINI_MODEL_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(_GEMINI_MODEL_CACHE_FILE, "w", encoding="utf-8") as f:
+            f.write(model_name.strip() + "\n")
+    except Exception:
+        pass
+
+
+_last = _load_last_working_model()
+if _last and _last in ALLOWED_MODELS:
+    MODEL_NAME = _last
+    MODEL_FALLBACKS = []  # 재시도 없이 이 모델만 사용
 
 
 def _ensure_genai(api_key: Optional[str]) -> None:
@@ -392,9 +430,9 @@ def batch_stock_analysis_with_scores(
     if not HAS_GENAI or not api_key or not stocks_data_list:
         return [], None
     _ensure_genai(api_key)
-    model = genai.GenerativeModel(MODEL_NAME)
     results: list[dict] = []
     err_msg: Optional[str] = None
+    models_to_try = [MODEL_NAME] + MODEL_FALLBACKS
     for i in range(0, len(stocks_data_list), batch_size):
         batch = stocks_data_list[i : i + batch_size]
         block = []
@@ -406,16 +444,26 @@ def batch_stock_analysis_with_scores(
                     gap = f"목표가괴리율={g:.1f}%"
                 except (TypeError, ZeroDivisionError):
                     pass
+            headlines = s.get("headlines") or s.get("seeking_alpha_headlines") or s.get("headlines_or_reports")
+            if headlines is None or not isinstance(headlines, (list, tuple)):
+                headlines = []
+            opm = s.get("opm_pct")
+            if opm is None:
+                opm_str = "N/A"
+            elif isinstance(opm, (int, float)) and opm > 99:
+                opm_str = "%.0f%%(과대·확인필요)" % min(opm, 999)
+            else:
+                opm_str = "%.1f%%" % opm
             block.append(
-                "[%s] %s | 현재가=%s 목표가=%s %s | OPM=%s%% | 헤드라인/리포트=%s"
+                "[%s] %s | 현재가=%s 목표가=%s %s | OPM=%s | 헤드라인/리포트=%s"
                 % (
                     s.get("ticker", "?"),
                     s.get("name", "?"),
                     s.get("current_price"),
                     s.get("target_price"),
                     gap,
-                    s.get("opm_pct"),
-                    str((s.get("headlines") or s.get("seeking_alpha_headlines") or s.get("headlines_or_reports"))[:5]),
+                    opm_str,
+                    str(headlines[:5]),
                 )
             )
         user = f"""[{market_label} 후보 종목 데이터 - 이미 계산된 수치 포함]
@@ -424,26 +472,45 @@ def batch_stock_analysis_with_scores(
 위 데이터를 바탕으로 Score = Gap 30% + Fundamental 40% + Sentiment 30% 로 점수화하고, 상위 10개만 골라 주세요.
 각 종목마다 한 줄: ticker | name | Score(0~100) | 근거(한 줄). JSON 배열로만 출력:
 [{{"ticker":"AAPL","name":"Apple","score":85,"reason":"괴리 25% 가산, OPM 15%"}}, ...]"""
-        try:
-            resp = model.generate_content(
-                QUANT_SYSTEM_PROMPT + "\n\n" + user,
-                generation_config=genai.types.GenerationConfig(temperature=0.2, max_output_tokens=2048),
-            )
-            text = (resp.text or "").strip()
-            arr = _parse_json_array_robust(text)
-            for x in (arr or []):
-                if isinstance(x, dict) and x.get("ticker"):
-                    results.append({
-                        "ticker": str(x.get("ticker", "")).strip(),
-                        "name": str(x.get("name", x.get("ticker", ""))).strip(),
-                        "score": int(x.get("score", 0)) if x.get("score") is not None else 0,
-                        "reason": str(x.get("reason", ""))[:300],
-                        "market": market_label,
-                    })
-        except Exception as e:
-            err_msg = str(e)
-            if "429" in err_msg or "resource_exhausted" in err_msg.lower():
+        full_prompt = QUANT_SYSTEM_PROMPT + "\n\n" + user
+        _plog = logging.getLogger(PIPELINE_LOG)
+        _plog.debug("Gemini batch_stock_analysis 프롬프트 (앞 2500자):\n%s", full_prompt[:2500])
+        batch_ok = False
+        for model_name in models_to_try:
+            model = genai.GenerativeModel(model_name)
+            try:
+                resp = model.generate_content(
+                    full_prompt,
+                    generation_config=genai.types.GenerationConfig(temperature=0.2, max_output_tokens=2048),
+                )
+                text = (resp.text or "").strip()
+                if not text:
+                    _plog.debug("Gemini batch_stock_analysis 응답: 빈 응답 (배치 %d)", i // batch_size + 1)
+                else:
+                    _plog.debug("Gemini batch_stock_analysis 응답 (앞 1200자):\n%s", text[:1200])
+                arr = _parse_json_array_robust(text)
+                for x in (arr or []):
+                    if isinstance(x, dict) and x.get("ticker"):
+                        results.append({
+                            "ticker": str(x.get("ticker", "")).strip(),
+                            "name": str(x.get("name", x.get("ticker", ""))).strip(),
+                            "score": int(x.get("score", 0)) if x.get("score") is not None else 0,
+                            "reason": str(x.get("reason", ""))[:300],
+                            "market": market_label,
+                        })
+                _save_last_working_model(model_name)
+                batch_ok = True
                 break
+            except Exception as e:
+                err_msg = str(e)
+                print("  [Gemini API 오류] batch_stock_analysis (%s):" % model_name, err_msg[:500])
+                is_429 = "429" in err_msg or "resource_exhausted" in err_msg.lower()
+                if is_429 and models_to_try.index(model_name) + 1 < len(models_to_try):
+                    print("  [로그] 한도 초과 → 다음 모델로 시도:", models_to_try[models_to_try.index(model_name) + 1])
+                elif not is_429:
+                    raise
+        if not batch_ok and err_msg and ("429" in err_msg or "resource_exhausted" in err_msg.lower()):
+            break
         if i + batch_size < len(stocks_data_list):
             time.sleep(sleep_sec)
     results.sort(key=lambda x: -x.get("score", 0))
@@ -462,7 +529,7 @@ def batch_chart_analysis_top10(
     if not HAS_GENAI or not api_key or not charts_summary_list:
         return [], None
     _ensure_genai(api_key)
-    model = genai.GenerativeModel(MODEL_NAME)
+    models_to_try = [MODEL_NAME] + MODEL_FALLBACKS
     block = "\n".join(
         "[%s] %s | 정배열=%s 골드크로스=%s 이격도200=%s RSI=%s"
         % (
@@ -481,22 +548,40 @@ def batch_chart_analysis_top10(
 조건: 50>100>200 정배열, 골든크로스, 200이평 이격도 적정, 정배열인데 RSI 30 이하 우선. 정답 차트와 유사한 패턴 우선.
 상위 10개만 골라 한 줄씩: symbol | name | 근거(한 줄). JSON 배열만:
 [{{"symbol":"005930.KS","name":"삼성전자","reason":"정배열+골드크로스, 이격도 1.02"}}, ...]"""
-    try:
-        resp = model.generate_content(
-            PATTERN_DESCRIPTION + "\n\n" + user,
-            generation_config=genai.types.GenerationConfig(temperature=0.2, max_output_tokens=2048),
-        )
-        text = (resp.text or "").strip()
-        arr = _parse_json_array_robust(text)
-        results = []
-        for x in (arr or []):
-            if isinstance(x, dict) and x.get("symbol"):
-                results.append({
-                    "symbol": str(x.get("symbol", "")).strip(),
-                    "name": str(x.get("name", x.get("symbol", ""))).strip(),
-                    "reason": str(x.get("reason", ""))[:300],
-                    "market": market_label,
-                })
-        return results[:10], None
-    except Exception as e:
-        return [], str(e)
+    full_prompt = PATTERN_DESCRIPTION + "\n\n" + user
+    _plog = logging.getLogger(PIPELINE_LOG)
+    _plog.debug("Gemini batch_chart_analysis 프롬프트 (앞 2500자):\n%s", full_prompt[:2500])
+    err = ""
+    for model_name in models_to_try:
+        model = genai.GenerativeModel(model_name)
+        try:
+            resp = model.generate_content(
+                full_prompt,
+                generation_config=genai.types.GenerationConfig(temperature=0.2, max_output_tokens=2048),
+            )
+            text = (resp.text or "").strip()
+            if not text:
+                _plog.debug("Gemini batch_chart_analysis 응답: 빈 응답")
+            else:
+                _plog.debug("Gemini batch_chart_analysis 응답 (앞 1200자):\n%s", text[:1200])
+            arr = _parse_json_array_robust(text)
+            results = []
+            for x in (arr or []):
+                if isinstance(x, dict) and x.get("symbol"):
+                    results.append({
+                        "symbol": str(x.get("symbol", "")).strip(),
+                        "name": str(x.get("name", x.get("symbol", ""))).strip(),
+                        "reason": str(x.get("reason", ""))[:300],
+                        "market": market_label,
+                    })
+            _save_last_working_model(model_name)
+            return results[:10], None
+        except Exception as e:
+            err = str(e)
+            print("  [Gemini API 오류] batch_chart_analysis (%s):" % model_name, err[:500])
+            is_429 = "429" in err or "resource_exhausted" in err.lower()
+            if is_429 and models_to_try.index(model_name) + 1 < len(models_to_try):
+                print("  [로그] 한도 초과 → 다음 모델로 시도:", models_to_try[models_to_try.index(model_name) + 1])
+            elif not is_429:
+                return [], err
+    return [], err

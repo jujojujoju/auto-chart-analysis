@@ -1,14 +1,13 @@
 # -*- coding: utf-8 -*-
-"""미국 시장 데이터: Seeking Alpha, Finviz, Yahoo Finance.
+"""미국 시장 데이터: Finviz(목표가·Recom·테이블) + Yahoo Finance.
 
-- Seeking Alpha: https://seekingalpha.com/symbol/{TICKER}/analysis (상위 5개 헤드라인)
-- Finviz: https://finviz.com/quote.ashx?t={TICKER} (목표가, Rating 등 테이블 최대 20행)
-- Yahoo: https://finance.yahoo.com/quote/{TICKER}/financials (재무, OPM 등)
+- Finviz: https://finviz.com/quote.ashx?t={TICKER} (Target Price, Recommendation, 메인·애널리스트 테이블)
+- Yahoo: https://finance.yahoo.com (현재가·재무·OPM)
 """
 
 import re
 from dataclasses import dataclass, field
-from typing import Any, List, Optional
+from typing import List, Optional
 from urllib.request import Request, urlopen
 
 USER_AGENT = (
@@ -22,39 +21,12 @@ class USStockData:
     ticker: str
     current_price: float = 0.0
     volume_change_pct: Optional[float] = None
-    seeking_alpha_headlines: List[str] = field(default_factory=list)
-    finviz_targets: List[dict] = field(default_factory=list)  # {"price_target", "rating", "date"} 등
+    finviz_targets: List[dict] = field(default_factory=list)  # Target Price, Recommendation, Price Target Change 테이블 등
     opm_pct: Optional[float] = None
     institutional_pct: Optional[float] = None
     target_price: Optional[float] = None
     rating: Optional[str] = None
-
-
-def fetch_seeking_alpha_headlines(ticker: str, max_items: int = 5) -> List[str]:
-    """Seeking Alpha 분석 페이지에서 상위 헤드라인만 추출."""
-    url = f"https://seekingalpha.com/symbol/{ticker.upper()}/analysis"
-    headlines: List[str] = []
-    try:
-        req = Request(url, headers={"User-Agent": USER_AGENT})
-        with urlopen(req, timeout=12) as resp:
-            html = resp.read().decode("utf-8", errors="ignore")
-        # 분석 글 제목 패턴 (실제 사이트 구조에 맞게 조정 필요)
-        for m in re.finditer(r'<a[^>]+href="[^"]*article[^"]*"[^>]*>([^<]{15,120})</a>', html):
-            t = re.sub(r"\s+", " ", m.group(1).strip())
-            if t and t not in headlines:
-                headlines.append(t[:150])
-                if len(headlines) >= max_items:
-                    break
-        if not headlines:
-            for m in re.finditer(r'data-test-id="post-list-item"[^>]*>.*?<span[^>]*>([^<]{20,150})</span>', html, re.DOTALL):
-                t = re.sub(r"\s+", " ", m.group(1).strip())
-                if t:
-                    headlines.append(t[:150])
-                    if len(headlines) >= max_items:
-                        break
-    except Exception:
-        pass
-    return headlines[:max_items]
+    finviz_url: Optional[str] = None
 
 
 def fetch_finviz_quote(ticker: str, max_rows: int = 20) -> List[dict]:
@@ -88,30 +60,26 @@ def fetch_finviz_quote(ticker: str, max_rows: int = 20) -> List[dict]:
 
 
 def fetch_yahoo_financials_opm(ticker: str) -> Optional[float]:
-    """Yahoo Finance에서 최근 분기 영업이익률(OPM %) 추출. yfinance 사용."""
+    """Yahoo Finance 재무제표에서 영업이익·매출을 가져와 OPM = 영업이익/매출*100 으로 직접 계산."""
     try:
         import yfinance as yf
         t = yf.Ticker(ticker)
         fin = t.financials
         if fin is None or fin.empty:
             return None
-        # Operating Income / Total Revenue * 100
-        if "Operating Revenue" in fin.index:
-            rev = fin.loc["Operating Revenue"].iloc[0] if "Operating Revenue" in fin.index else None
-        else:
-            rev = fin.loc["Total Revenue"].iloc[0] if "Total Revenue" in fin.index else None
+        rev = fin.loc["Total Revenue"].iloc[0] if "Total Revenue" in fin.index else (fin.loc["Operating Revenue"].iloc[0] if "Operating Revenue" in fin.index else None)
         op_income = fin.loc["Operating Income"].iloc[0] if "Operating Income" in fin.index else None
-        if rev and op_income and rev != 0:
-            return round(float(op_income / rev * 100), 2)
+        if rev is not None and op_income is not None and float(rev) != 0:
+            return round(float(op_income) / float(rev) * 100, 2)
     except Exception:
         pass
     return None
 
 
 def fetch_us_stock_data(ticker: str) -> USStockData:
-    """한 종목에 대해 Seeking Alpha, Finviz, Yahoo 재무 수집."""
+    """한 종목에 대해 Finviz(목표가·Recom·테이블), Yahoo(현재가·OPM) 수집."""
     data = USStockData(ticker=ticker)
-    data.seeking_alpha_headlines = fetch_seeking_alpha_headlines(ticker, 5)
+    data.finviz_url = f"https://finviz.com/quote.ashx?t={ticker.upper()}"
     data.finviz_targets = fetch_finviz_quote(ticker, 20)
     data.opm_pct = fetch_yahoo_financials_opm(ticker)
     try:

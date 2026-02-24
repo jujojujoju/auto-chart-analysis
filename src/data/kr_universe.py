@@ -71,25 +71,13 @@ def _fetch_from_fdr() -> Tuple[List[str], dict]:
 
 
 def fetch_kr_market_cap_top500(cache_dir: Path) -> Tuple[List[str], dict]:
-    """시가총액 순위 500개 종목 + ticker->name. 캐시(같은 날) 재사용."""
-    from datetime import datetime
-    import json
-    cache_path = cache_dir / "kr_market_cap_top500.json"
-    today = datetime.now().strftime("%Y-%m-%d")
-    if cache_path.exists():
-        try:
-            with open(cache_path, encoding="utf-8") as f:
-                data = json.load(f)
-            if data.get("date") == today:
-                return data.get("tickers", [])[:500], data.get("ticker_names", {})
-        except (json.JSONDecodeError, OSError):
-            pass
-
+    """시가총액 순위 500개 종목 + ticker->name. 최초 500 선별은 캐시 미사용, 항상 KRX에서 재수집."""
     try:
         import FinanceDataReader as fdr
         krx = fdr.StockListing("KRX")
         if krx is None or krx.empty:
-            return fetch_kr_tickers_with_cache(cache_dir)[0][:500], {}
+            tickers, names = _fetch_from_fdr()
+            return tickers[:500], names
         # Marcap(시가총액) 기준 정렬. 컬럼명은 버전에 따라 다를 수 있음
         marcap_col = None
         for c in ["Marcap", "Market Cap", "marcap"]:
@@ -118,15 +106,10 @@ def fetch_kr_market_cap_top500(cache_dir: Path) -> Tuple[List[str], dict]:
             if name:
                 names[t] = name
         tickers = list(dict.fromkeys(tickers))[:500]
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        try:
-            with open(cache_path, "w", encoding="utf-8") as f:
-                json.dump({"date": today, "tickers": tickers, "ticker_names": names}, f, indent=2, ensure_ascii=False)
-        except OSError:
-            pass
         return tickers, names
     except Exception:
-        return fetch_kr_tickers_with_cache(cache_dir)[0][:500], {}
+        tickers, names = _fetch_from_fdr()
+        return tickers[:500], names
 
 
 def _fallback_kr_tickers() -> Tuple[List[str], dict]:

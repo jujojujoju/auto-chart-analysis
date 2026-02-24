@@ -31,30 +31,52 @@ class KRStockData:
     target_price: Optional[float] = None
     rating: Optional[str] = None
     headlines_or_reports: List[str] = field(default_factory=list)
+    fnguide_url: Optional[str] = None
 
 
 def fetch_fnguide_main(gicode: str) -> dict:
-    """Fnguide SVD_Main 페이지에서 재무·목표가·리포트 관련 데이터 추출."""
+    """Fnguide SVD_Main 페이지에서 재무·목표가·리포트 추출. OPM은 영업이익/매출액으로 직접 계산."""
     url = f"https://comp.fnguide.com/SVO2/ASP/SVD_Main.asp?gertxt=1&pGB=1&c3=&gicode={gicode}"
     out = {"opm": None, "target_price": None, "rating": None, "texts": []}
     try:
         req = Request(url, headers={"User-Agent": USER_AGENT})
         with urlopen(req, timeout=12) as resp:
             html = resp.read().decode("utf-8", errors="ignore")
-        # 영업이익률: 테이블에서 '영업이익률' 또는 OPM
-        for m in re.finditer(r"영업이익률[^<]*</[^>]+>\s*<[^>]+>([^<%\d.-]+)([.\d]+)%?", html):
+        # 영업이익·매출액 파싱 후 OPM = 영업이익/매출액*100 직접 계산
+        revenue: Optional[float] = None
+        op_income: Optional[float] = None
+        # 매출액: 매출액 라벨 뒤 숫자 (단위 억/만 등 제거용으로 숫자만)
+        for m in re.finditer(r"매출액[^<]*</[^>]+>\s*<[^>]+>[^<]*?([-]?[\d,]+(?:\.\d+)?)", html):
             try:
-                out["opm"] = float(m.group(2).replace(",", ""))
+                revenue = float(m.group(1).replace(",", ""))
+                if revenue != 0:
+                    break
+            except ValueError:
+                pass
+        if revenue is None:
+            for m in re.finditer(r"Revenue[^<]*</[^>]+>\s*<[^>]+>[^<]*?([-]?[\d,]+(?:\.\d+)?)", html, re.I):
+                try:
+                    revenue = float(m.group(1).replace(",", ""))
+                    if revenue != 0:
+                        break
+                except ValueError:
+                    pass
+        # 영업이익
+        for m in re.finditer(r"영업이익[^<]*</[^>]+>\s*<[^>]+>[^<]*?([-]?[\d,]+(?:\.\d+)?)", html):
+            try:
+                op_income = float(m.group(1).replace(",", ""))
                 break
             except ValueError:
                 pass
-        if out["opm"] is None:
-            for m in re.finditer(r"Operating\s*Margin[^<]*</[^>]+>\s*<[^>]+>([.\d]+)", html, re.I):
+        if op_income is None:
+            for m in re.finditer(r"Operating\s*Income[^<]*</[^>]+>\s*<[^>]+>[^<]*?([-]?[\d,]+(?:\.\d+)?)", html, re.I):
                 try:
-                    out["opm"] = float(m.group(1).replace(",", ""))
+                    op_income = float(m.group(1).replace(",", ""))
                     break
                 except ValueError:
                     pass
+        if revenue is not None and op_income is not None and revenue != 0:
+            out["opm"] = round(op_income / revenue * 100, 2)
         # 목표가
         for m in re.finditer(r"목표가[^<]*</[^>]+>\s*<[^>]+>([\d,]+)", html):
             try:
@@ -78,6 +100,7 @@ def fetch_kr_stock_data(ticker: str, current_price: float = 0.0) -> KRStockData:
     """한 종목 Fnguide 수집. current_price는 차트에서 넣어줄 수 있음."""
     data = KRStockData(ticker=ticker, current_price=current_price)
     gicode = kr_ticker_to_gicode(ticker)
+    data.fnguide_url = f"https://comp.fnguide.com/SVO2/ASP/SVD_Main.asp?gertxt=1&pGB=1&c3=&gicode={gicode}"
     raw = fetch_fnguide_main(gicode)
     data.opm_pct = raw.get("opm")
     data.target_price = raw.get("target_price")

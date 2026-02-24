@@ -14,33 +14,17 @@ except ImportError:
 
 # Wikipedia S&P 500 테이블
 WIKI_URL = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-CACHE_FILENAME = "sp500_tickers.json"
+
+# 최초 500 종목 선별은 캐시 사용 안 함. 이 개수 미만이면 fallback 사용.
+MIN_SP500_TICKERS = 100
 
 
 def fetch_sp500_tickers_with_cache(cache_dir: Path) -> List[str]:
-    """S&P 500 종목 리스트. 캐시 있으면 재사용 (같은 날)."""
-    today = __import__("datetime").datetime.now().strftime("%Y-%m-%d")
-    cache_path = cache_dir / CACHE_FILENAME
-
-    if cache_path.exists():
-        try:
-            with open(cache_path, encoding="utf-8") as f:
-                data = json.load(f)
-            if data.get("date") == today:
-                return data.get("tickers", [])
-        except (json.JSONDecodeError, OSError):
-            pass
-
+    """S&P 500 종목 리스트. 최초 500 선별은 캐시 미사용, 항상 Wikipedia에서 재수집."""
     tickers = _fetch_sp500_from_wikipedia()
-    if tickers:
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        try:
-            with open(cache_path, "w", encoding="utf-8") as f:
-                json.dump({"date": today, "tickers": tickers}, f, indent=2)
-        except OSError:
-            pass
-
-    return tickers
+    if not tickers or len(tickers) < MIN_SP500_TICKERS:
+        return _fallback_sp500()
+    return tickers[:600]
 
 
 def _fetch_sp500_from_wikipedia() -> List[str]:
@@ -59,7 +43,9 @@ def _fetch_sp500_from_wikipedia() -> List[str]:
     pattern = re.compile(r"<td[^>]*><a[^>]*>([A-Z]{1,5})</a></td>")
     candidates = pattern.findall(html)
     tickers = list(dict.fromkeys(c for c in candidates if 1 <= len(c) <= 5))
-    return tickers[:600] if tickers else _fallback_sp500()
+    if not tickers or len(tickers) < MIN_SP500_TICKERS:
+        return _fallback_sp500()
+    return tickers[:600]
 
 
 def _fallback_sp500() -> List[str]:
