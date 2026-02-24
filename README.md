@@ -9,8 +9,8 @@
 ### 전체 흐름
 
 1. **유니버스**  
-   - 미국: S&P 500 (Wikipedia 또는 yfinance) 500종목  
-   - 한국: 시가총액 순위 500종목 (FinanceDataReader KRX)
+   - 미국: S&P 500 (Wikipedia, **캐시 미사용**·항상 재수집)  
+   - 한국: 시가총액 순위 500종목 (FinanceDataReader KRX, **캐시 미사용**·항상 재수집)
 
 2. **차트 데이터**  
    - 일봉 기준 **3년치** OHLCV 수집 (캐시 사용)  
@@ -21,14 +21,16 @@
    - **후보 50개 이하**로 압축 (RPD 절약)
 
 4. **종목 분석 (Gemini)**  
-   - 후보에 대해 미국: Seeking Alpha·Finviz·Yahoo 재무 / 한국: Fnguide 수집  
-   - **배치 전략**: 한 번에 10종목씩 묶어 API 호출, 호출 간 **12초 대기** (RPM 5 제한)  
-   - 스코어: **목표가 괴리율 30% + 재무 건전성(OPM 등) 40% + 시장 심리 30%**  
+   - 후보에 대해 **미국**: Finviz(목표가·Recom·테이블)·Yahoo(현재가·OPM) / **한국**: Fnguide(영업이익·매출액·리포트) 수집  
+   - 종목별 **3일 TTL 캐시** 사용(만료 시에만 재수집), OPM은 **영업이익/매출로 직접 계산**  
+   - **배치**: 10종목씩 Gemini 호출, 호출 간 12초 대기  
+   - 스코어: **괴리율 30% + 재무(OPM) 40% + 심리(리포트/헤드라인) 30%**  
+   - **사용량 초과(429) 시**: gemini-2.5-flash → 2.5-flash-lite만 시도, 둘 다 실패하면 **Gemini 호출 중단** → 괴리·OPM 기준으로만 TOP 10 선정  
    - 미국 TOP 10, 한국 TOP 10 선정
 
 5. **차트 분석**  
-   - 50/100/200 정배열·골든크로스·200 이격도 적정·정배열인데 RSI 30 이하 등으로 규칙 점수 산출  
-   - 가능하면 Gemini에 배치로 전달해 정답 패턴 유사도 반영, 실패 시 **규칙 기반**만으로 TOP 10 선정  
+   - 50/100/200 정배열·골든크로스·200 이격도 적정·RSI 30 이하 등 규칙 점수 산출  
+   - Gemini에 배치 전달해 정답 패턴 유사도 반영, **실패/429 시 규칙 기반만**으로 TOP 10 선정  
    - 미국 TOP 10, 한국 TOP 10 선정
 
 6. **텔레그램 전송**  
@@ -43,11 +45,10 @@
 
 | 용도 | 출처 | URL/방식 |
 |------|------|----------|
-| 종목 풀 | S&P 500 | Wikipedia `List of S&P 500 companies` 또는 yfinance |
-| OHLCV | yfinance | 일봉 3년 |
-| 전문가 분석 | Seeking Alpha | `https://seekingalpha.com/symbol/{TICKER}/analysis` (상위 5개 헤드라인) |
-| 전문가 분석 | Finviz | `https://finviz.com/quote.ashx?t={TICKER}` (Price Target, Rating 등 테이블 최대 20행) |
-| 재무·기관 | Yahoo Finance | `https://finance.yahoo.com/quote/{TICKER}/financials` (OPM, 목표가 등) |
+| 종목 풀 | S&P 500 | Wikipedia `List of S&P 500 companies` (캐시 미사용) |
+| OHLCV | yfinance | 일봉 3년, 캐시 사용 |
+| 목표가·Recom | Finviz | `https://finviz.com/quote.ashx?t={TICKER}` (Target Price, Recommendation, 테이블) |
+| 현재가·OPM | Yahoo Finance | yfinance (현재가, 재무제표에서 **영업이익/매출로 OPM 직접 계산**) |
 
 ### 한국 (KR)
 
@@ -55,26 +56,27 @@
 |------|------|----------|
 | 종목 풀 | FinanceDataReader | `fdr.StockListing('KRX')` 시가총액 정렬 상위 500 |
 | OHLCV | yfinance | 일봉 3년 (예: 005930.KS) |
-| 전문가·재무 | Fnguide | `https://comp.fnguide.com/SVO2/ASP/SVD_Main.asp?gicode=A{6자리}` (OPM, 목표가, 리팅 등) |
+| 재무·리포트 | Fnguide | `https://comp.fnguide.com/SVO2/ASP/SVD_Main.asp?gicode=A{6자리}` (영업이익·매출액으로 **OPM 직접 계산**, 목표가, 리팅 문구) |
 | 공시 | Open DART | 현재 API 미연동으로 **주석 처리** (`opendart.fss.or.kr/api/fnlttSinglAcnt.json`) |
 
 ---
 
-## API 사용 전략 (RPD 20 / RPM 5)
+## API 사용 전략 (Gemini)
 
-- **1차 필터**: 파이썬으로만 수행해 AI에 넘길 후보를 **50개 이하**로 축소  
-- **배치 크기**: 한 번에 **10종목**씩 묶어 1회 API 호출 → 50종목이면 **5회** RPD 사용  
-- **RPM 제어**: 호출 사이 **12초 대기** (`time.sleep(12)`)
+- **1차 필터**: 파이썬으로만 후보 **50개 이하** 축소  
+- **배치**: 10종목씩 1회 호출, 호출 간 **12초 대기**  
+- **모델**: gemini-2.5-flash → 2.5-flash-lite만 시도(각 1회). **둘 다 429면** Gemini 호출 중단 → 괴리·OPM(종목) / 규칙(차트) 기준으로만 TOP 10  
+- **마지막 성공 모델**은 `cache/last_gemini_model.txt`에 저장되어 다음 실행부터 해당 모델만 사용
 
 ---
 
 ## 스코어 공식 (종목 분석)
 
-- **목표가 괴리율 (Gap, 30%)**: `(목표가 - 현재가) / 현재가 × 100`. 괴리 20% 이상일 때 높은 점수  
-- **재무 건전성 (Fundamental, 40%)**: 영업이익률(OPM) 10% 이상 또는 최근 분기 흑자 전환 시 가산  
-- **시장 심리 (Sentiment, 30%)**: 리포트/헤드라인에 '역대급', 'Strong Buy', '상향' 등 긍정 단어 포함 시 가산  
+- **괴리율 (Gap, 30%)**: `(목표가 - 현재가) / 현재가 × 100`  
+- **재무 (Fundamental, 40%)**: OPM(영업이익/매출 직접 계산)  
+- **심리 (Sentiment, 30%)**: 한국 Fnguide 리포트 등 가능한 데이터로 반영  
 
-가능한 데이터는 사전 계산해 Gemini에 넘기고, 모델은 가중 합산 및 TOP 10 선정·근거 작성에 사용합니다.
+Gemini에 사전 계산값을 넘기고, 가중 합산·TOP 10 선정·근거 작성. **API 실패 시** 괴리·OPM만으로 폴백 점수 산출.
 
 ---
 
@@ -149,11 +151,11 @@ auto-chart-analysis/
 │   ├── logic/           # ohlcv_processor, indicators, filter_candidates
 │   ├── intelligence/    # gemini_analyzer (배치 스코어링·차트 분석)
 │   └── delivery/        # telegram_notifier
-├── cache/               # OHLCV·정규화·유니버스 캐시
+├── cache/               # OHLCV 캐시, stock_analysis_us/kr(종목별 3일 TTL), last_gemini_model.txt
 ├── output/              # daily_report.json
 ├── run_pipeline.py
 ├── .env
-└── .github/workflows/    # 스케줄 실행 (선택)
+└── .github/workflows/    # 매일 09:00 KST 1회 실행 (workflow_dispatch로 수동 실행 가능)
 ```
 
 ---
