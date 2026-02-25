@@ -14,14 +14,19 @@ except ImportError:
 
 # Wikipedia S&P 500 테이블
 WIKI_URL = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+# Wikipedia 실패 시 사용할 CSV (Symbol 컬럼)
+SP500_CSV_FALLBACK_URL = "https://raw.githubusercontent.com/datasets/s-and-p-500-companies/master/data/constituents.csv"
 
 # 최초 500 종목 선별은 캐시 사용 안 함. 이 개수 미만이면 fallback 사용.
 MIN_SP500_TICKERS = 100
+TARGET_SP500_COUNT = 500
 
 
 def fetch_sp500_tickers_with_cache(cache_dir: Path) -> List[str]:
-    """S&P 500 종목 리스트. 최초 500 선별은 캐시 미사용, 항상 Wikipedia에서 재수집."""
+    """S&P 500 종목 리스트. 최초 500 선별은 캐시 미사용, Wikipedia → 실패 시 GitHub CSV → 50종목 fallback."""
     tickers = _fetch_sp500_from_wikipedia()
+    if not tickers or len(tickers) < MIN_SP500_TICKERS:
+        tickers = _fetch_sp500_from_csv_fallback()
     if not tickers or len(tickers) < MIN_SP500_TICKERS:
         return _fallback_sp500()
     return tickers[:600]
@@ -46,6 +51,26 @@ def _fetch_sp500_from_wikipedia() -> List[str]:
     if not tickers or len(tickers) < MIN_SP500_TICKERS:
         return _fallback_sp500()
     return tickers[:600]
+
+
+def _fetch_sp500_from_csv_fallback() -> List[str]:
+    """GitHub S&P 500 constituents CSV에서 Symbol 컬럼만 추출 (Wikipedia 실패 시)."""
+    if not HAS_URLLIB:
+        return []
+    req = urllib.request.Request(SP500_CSV_FALLBACK_URL, headers={"User-Agent": "Mozilla/5.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            raw = resp.read().decode("utf-8", errors="ignore")
+    except Exception:
+        return []
+    tickers: List[str] = []
+    for line in raw.strip().split("\n")[1:]:  # skip header
+        part = line.split(",")
+        if part:
+            sym = part[0].strip().upper()
+            if sym and 1 <= len(sym) <= 5 and sym.replace("-", "").replace(".", "").isalnum():
+                tickers.append(sym)
+    return list(dict.fromkeys(tickers))[:TARGET_SP500_COUNT] if tickers else []
 
 
 def _fallback_sp500() -> List[str]:

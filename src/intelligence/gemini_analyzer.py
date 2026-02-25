@@ -19,12 +19,13 @@ except ImportError:
     HAS_GENAI = False
 
 
-# 2.5-flash, 2.5-flash-lite만 시도. 둘 다 429면 Gemini 호출 중단 → run_pipeline에서 괴리·OPM/규칙 기준으로만 추천
-MODEL_NAME = "gemini-2.5-flash"
-MODEL_FALLBACKS = ["gemini-2.5-flash-lite"]
-ALLOWED_MODELS = ("gemini-2.5-flash", "gemini-2.5-flash-lite")
+# 모델 시도 순서: 2.5 Flash → (실패 시 재시도 1회) → 2.5 Flash Lite → 재시도 1회 → 2.5 Pro → 재시도 1회 → 2.0 Flash
+# 캐시에 마지막 성공 모델이 있으면 그걸 1순위로 시도하고, 한도 초과 시 위 순서대로 다시 훑음. 전부 실패 시 스태틱 로직으로 처리.
+MODEL_ORDER = ("gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.5-pro", "gemini-2.0-flash")
+MODEL_NAME = MODEL_ORDER[0]  # 배치 외 단일 호출용 기본값
+MAX_RETRIES_PER_MODEL = 1  # 각 모델당 최대 2회 시도(1회 재시도)
 
-# 마지막으로 성공한 모델 저장 경로. 있으면 다음 실행부터 해당 모델만 사용(재시도 없음)
+# 마지막으로 성공한 모델 저장 경로
 _GEMINI_MODEL_CACHE_FILE = Path(__file__).resolve().parent.parent.parent / "cache" / "last_gemini_model.txt"
 
 
@@ -34,7 +35,7 @@ def _load_last_working_model() -> Optional[str]:
         if _GEMINI_MODEL_CACHE_FILE.exists():
             with open(_GEMINI_MODEL_CACHE_FILE, encoding="utf-8") as f:
                 name = f.read().strip()
-            if name and name.startswith("gemini-"):
+            if name and name.startswith("gemini-") and name in MODEL_ORDER:
                 return name
     except Exception:
         pass
@@ -42,7 +43,7 @@ def _load_last_working_model() -> Optional[str]:
 
 
 def _save_last_working_model(model_name: str) -> None:
-    """성공한 모델명을 캐시에 저장. 다음 실행부터 이 모델만 사용."""
+    """성공한 모델명을 캐시에 저장. 다음 실행 시 1순위로 시도(한도 초과 시 순서대로 재시도)."""
     try:
         _GEMINI_MODEL_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
         with open(_GEMINI_MODEL_CACHE_FILE, "w", encoding="utf-8") as f:
@@ -51,10 +52,29 @@ def _save_last_working_model(model_name: str) -> None:
         pass
 
 
-_last = _load_last_working_model()
-if _last and _last in ALLOWED_MODELS:
-    MODEL_NAME = _last
-    MODEL_FALLBACKS = []  # 재시도 없이 이 모델만 사용
+def _get_models_to_try() -> list:
+    """시도할 모델 순서: 캐시된 모델(있으면) 1순위, 그 다음 MODEL_ORDER에서 나머지."""
+    cached = _load_last_working_model()
+    if cached:
+        return [cached] + [m for m in MODEL_ORDER if m != cached]
+    return list(MODEL_ORDER)
+
+
+def _is_quota_or_rate_error(err_msg: str) -> bool:
+    """한도 초과/할당량/rate limit 오류면 True → 다음 모델로 시도."""
+    if not err_msg:
+        return False
+    s = err_msg.lower()
+    return (
+        "429" in err_msg
+        or "resource_exhausted" in s
+        or "quota" in s
+        or "rate limit" in s
+        or "rpm" in s
+        or "rpd" in s
+        or "tpm" in s
+        or "exceeded your current quota" in s
+    )
 
 
 def _ensure_genai(api_key: Optional[str]) -> None:
@@ -312,12 +332,28 @@ def filter_rss_with_gemini(
 
 
 def _parse_json_array_robust(text: str) -> list:
-    """JSON 배열 파싱. 실패 시 trailing comma 제거 등 시도."""
+    """JSON 배열 파싱. 설명문 뒤에 JSON이 있어도 추출 (마지막 [{ 로 시작하는 배열)."""
+    if not text or not text.strip():
+        return []
     text = text.strip().replace("```json", "").replace("```", "").strip()
-    start = text.find("[")
+    # 모델이 서두에 설명을 붙인 경우: 마지막 '[{' 로 시작하는 배열만 추출
+    start = text.rfind("[{")
+    if start < 0:
+        start = text.find("[")
     if start < 0:
         return []
-    end = text.rfind("]") + 1
+    depth = 0
+    end = -1
+    for i in range(start, len(text)):
+        if text[i] == "[":
+            depth += 1
+        elif text[i] == "]":
+            depth -= 1
+            if depth == 0:
+                end = i + 1
+                break
+    if end <= start:
+        end = text.rfind("]") + 1
     if end <= start:
         return []
     raw = text[start:end]
@@ -407,12 +443,9 @@ def parse_gemini_response(text: str) -> dict:
 
 QUANT_SYSTEM_PROMPT = """당신은 퀀트 기반 투자 분석 전문가입니다. 감정 배제, 수치·공식 기반으로만 판단합니다.
 
-스코어 공식:
-1. 목표가 괴리율(Gap) 30%: (목표가 - 현재가) / 현재가 × 100. 괴리 20% 이상이면 높은 점수.
-2. 재무 건전성(Fundamental) 40%: 영업이익률(OPM) 10% 이상 또는 최근 분기 흑자 전환 시 가산.
-3. 시장 심리(Sentiment) 30%: '역대급', 'Strong Buy', '상향', '매수' 등 긍정 단어 포함 시 가산.
-
-각 종목에 대해 위 세 항목을 점수화(0~100)하고, 가중합으로 최종 Score를 계산한 뒤, 상위 종목만 선별하세요. 근거를 반드시 포함하세요."""
+입력에 각 종목별로 이미 계산된 퀀트점수(괴리·OPM·PER·PBR·ROE 기반)가 포함되어 있습니다.
+당신은 이 퀀트점수를 기본으로, 헤드라인/리포트의 시장 심리(Sentiment)만 반영해 최종 Score를 보정하고, 상위 10개만 선별하세요.
+예: 퀀트점수 75 + 매수/Strong Buy 등 긍정 의견 → Score 80~85, 근거에 '퀀트점수+심리 가산' 등으로 명시."""
 
 
 def batch_stock_analysis_with_scores(
@@ -432,7 +465,7 @@ def batch_stock_analysis_with_scores(
     _ensure_genai(api_key)
     results: list[dict] = []
     err_msg: Optional[str] = None
-    models_to_try = [MODEL_NAME] + MODEL_FALLBACKS
+    models_to_try = _get_models_to_try()
     for i in range(0, len(stocks_data_list), batch_size):
         batch = stocks_data_list[i : i + batch_size]
         block = []
@@ -441,7 +474,7 @@ def batch_stock_analysis_with_scores(
             if s.get("current_price") and s.get("target_price"):
                 try:
                     g = (float(s["target_price"]) - float(s["current_price"])) / float(s["current_price"]) * 100
-                    gap = f"목표가괴리율={g:.1f}%"
+                    gap = f"괴리={g:.1f}%"
                 except (TypeError, ZeroDivisionError):
                     pass
             headlines = s.get("headlines") or s.get("seeking_alpha_headlines") or s.get("headlines_or_reports")
@@ -451,11 +484,21 @@ def batch_stock_analysis_with_scores(
             if opm is None:
                 opm_str = "N/A"
             elif isinstance(opm, (int, float)) and opm > 99:
-                opm_str = "%.0f%%(과대·확인필요)" % min(opm, 999)
+                opm_str = "%.0f%%(과대·확인)" % min(opm, 999)
             else:
                 opm_str = "%.1f%%" % opm
-            block.append(
-                "[%s] %s | 현재가=%s 목표가=%s %s | OPM=%s | 헤드라인/리포트=%s"
+            qs = s.get("quant_score")
+            qr = s.get("quant_reason") or ""
+            per = s.get("per")
+            pbr = s.get("pbr")
+            roe = s.get("roe_pct")
+            extra = []
+            if per is not None: extra.append("PER=%s" % per)
+            if pbr is not None: extra.append("PBR=%s" % pbr)
+            if roe is not None: extra.append("ROE%%=%s" % roe)
+            extra_str = " " + " ".join(extra) if extra else ""
+            line = (
+                "[%s] %s | 현재가=%s 목표가=%s %s | OPM=%s%s | 퀀트점수=%s (%s) | 헤드라인/리포트=%s"
                 % (
                     s.get("ticker", "?"),
                     s.get("name", "?"),
@@ -463,53 +506,94 @@ def batch_stock_analysis_with_scores(
                     s.get("target_price"),
                     gap,
                     opm_str,
-                    str(headlines[:5]),
+                    extra_str,
+                    qs if qs is not None else "N/A",
+                    qr[:60] if qr else "",
+                    str(headlines[:8]),
                 )
             )
-        user = f"""[{market_label} 후보 종목 데이터 - 이미 계산된 수치 포함]
+            # 한국 추가: 실적이슈·시세현황·컨센서스·Business Summary (보유수량 제외)
+            yoy = s.get("yoy_pct")
+            ret1y = s.get("return_1y_pct")
+            foreign = s.get("foreign_pct")
+            mcap = s.get("market_cap_100m")
+            beta = s.get("beta")
+            consensus = s.get("consensus_line")
+            bs = (s.get("business_summary") or "")[:180].strip()
+            kr_extra = []
+            if yoy is not None: kr_extra.append("전년대비=%s%%" % yoy)
+            if ret1y is not None: kr_extra.append("1Y수익률=%s%%" % ret1y)
+            if foreign is not None: kr_extra.append("외국인=%s%%" % foreign)
+            if mcap is not None:
+                try:
+                    kr_extra.append("시총=%d억" % int(float(mcap)))
+                except (TypeError, ValueError):
+                    kr_extra.append("시총=%s억" % mcap)
+            if beta is not None: kr_extra.append("베타=%s" % beta)
+            if kr_extra:
+                line += " | " + " ".join(kr_extra)
+            if consensus:
+                line += " | " + str(consensus)[:60]
+            if bs:
+                line += " | BS: " + bs + ("…" if len(s.get("business_summary") or "") > 180 else "")
+            block.append(line)
+        user = f"""[{market_label} 후보 종목 데이터 - 퀀트점수·PER·PBR·ROE 이미 계산됨]
 {chr(10).join(block)}
 
-위 데이터를 바탕으로 Score = Gap 30% + Fundamental 40% + Sentiment 30% 로 점수화하고, 상위 10개만 골라 주세요.
+위 퀀트점수를 기준으로, 헤드라인/리포트의 Sentiment만 반영해 최종 Score(0~100)를 보정하고 상위 10개만 골라 주세요.
 각 종목마다 한 줄: ticker | name | Score(0~100) | 근거(한 줄). JSON 배열로만 출력:
-[{{"ticker":"AAPL","name":"Apple","score":85,"reason":"괴리 25% 가산, OPM 15%"}}, ...]"""
+[{{"ticker":"AAPL","name":"Apple","score":85,"reason":"퀀트점수+매수 의견"}}, ...]"""
         full_prompt = QUANT_SYSTEM_PROMPT + "\n\n" + user
         _plog = logging.getLogger(PIPELINE_LOG)
+        batch_num = i // batch_size + 1
+        _plog.debug("==================== Gemini 요청 (batch_stock_analysis %s, 배치 %d) ====================", market_label, batch_num)
         _plog.debug("Gemini batch_stock_analysis 프롬프트 (앞 2500자):\n%s", full_prompt[:2500])
         batch_ok = False
         for model_name in models_to_try:
             model = genai.GenerativeModel(model_name)
-            try:
-                resp = model.generate_content(
-                    full_prompt,
-                    generation_config=genai.types.GenerationConfig(temperature=0.2, max_output_tokens=2048),
-                )
-                text = (resp.text or "").strip()
-                if not text:
-                    _plog.debug("Gemini batch_stock_analysis 응답: 빈 응답 (배치 %d)", i // batch_size + 1)
-                else:
-                    _plog.debug("Gemini batch_stock_analysis 응답 (앞 1200자):\n%s", text[:1200])
-                arr = _parse_json_array_robust(text)
-                for x in (arr or []):
-                    if isinstance(x, dict) and x.get("ticker"):
-                        results.append({
-                            "ticker": str(x.get("ticker", "")).strip(),
-                            "name": str(x.get("name", x.get("ticker", ""))).strip(),
-                            "score": int(x.get("score", 0)) if x.get("score") is not None else 0,
-                            "reason": str(x.get("reason", ""))[:300],
-                            "market": market_label,
-                        })
-                _save_last_working_model(model_name)
-                batch_ok = True
+            for attempt in range(MAX_RETRIES_PER_MODEL + 1):
+                _plog.info("Gemini 시도 모델: %s (배치 %d)%s", model_name, batch_num, " 재시도" if attempt > 0 else "")
+                try:
+                    resp = model.generate_content(
+                        full_prompt,
+                        generation_config=genai.types.GenerationConfig(temperature=0.2, max_output_tokens=2048),
+                    )
+                    text = (resp.text or "").strip()
+                    if not text:
+                        _plog.debug("Gemini batch_stock_analysis 응답: 빈 응답 (배치 %d)", batch_num)
+                    else:
+                        _plog.debug("Gemini batch_stock_analysis 응답 (앞 1200자):\n%s", text[:1200])
+                    _plog.debug("==================== Gemini 응답 끝 (batch_stock_analysis %s 배치 %d) ====================", market_label, batch_num)
+                    arr = _parse_json_array_robust(text)
+                    for x in (arr or []):
+                        if isinstance(x, dict) and x.get("ticker"):
+                            results.append({
+                                "ticker": str(x.get("ticker", "")).strip(),
+                                "name": str(x.get("name", x.get("ticker", ""))).strip(),
+                                "score": int(x.get("score", 0)) if x.get("score") is not None else 0,
+                                "reason": str(x.get("reason", ""))[:300],
+                                "market": market_label,
+                            })
+                    _save_last_working_model(model_name)
+                    batch_ok = True
+                    break
+                except Exception as e:
+                    err_msg = str(e)
+                    print("  [Gemini API 오류] batch_stock_analysis (%s):" % model_name, err_msg[:500])
+                    is_quota = _is_quota_or_rate_error(err_msg)
+                    if not is_quota:
+                        raise
+                    if attempt < MAX_RETRIES_PER_MODEL:
+                        print("  [로그] 한도/할당량 초과 → 같은 모델 재시도 (%s)" % model_name)
+                    else:
+                        idx = models_to_try.index(model_name)
+                        if idx + 1 < len(models_to_try):
+                            print("  [로그] 한도/할당량 초과 → 다음 모델로 시도:", models_to_try[idx + 1])
+                    if attempt >= MAX_RETRIES_PER_MODEL:
+                        break
+            if batch_ok:
                 break
-            except Exception as e:
-                err_msg = str(e)
-                print("  [Gemini API 오류] batch_stock_analysis (%s):" % model_name, err_msg[:500])
-                is_429 = "429" in err_msg or "resource_exhausted" in err_msg.lower()
-                if is_429 and models_to_try.index(model_name) + 1 < len(models_to_try):
-                    print("  [로그] 한도 초과 → 다음 모델로 시도:", models_to_try[models_to_try.index(model_name) + 1])
-                elif not is_429:
-                    raise
-        if not batch_ok and err_msg and ("429" in err_msg or "resource_exhausted" in err_msg.lower()):
+        if not batch_ok and err_msg and _is_quota_or_rate_error(err_msg):
             break
         if i + batch_size < len(stocks_data_list):
             time.sleep(sleep_sec)
@@ -529,7 +613,7 @@ def batch_chart_analysis_top10(
     if not HAS_GENAI or not api_key or not charts_summary_list:
         return [], None
     _ensure_genai(api_key)
-    models_to_try = [MODEL_NAME] + MODEL_FALLBACKS
+    models_to_try = _get_models_to_try()
     block = "\n".join(
         "[%s] %s | 정배열=%s 골드크로스=%s 이격도200=%s RSI=%s"
         % (
@@ -546,42 +630,58 @@ def batch_chart_analysis_top10(
 {block}
 
 조건: 50>100>200 정배열, 골든크로스, 200이평 이격도 적정, 정배열인데 RSI 30 이하 우선. 정답 차트와 유사한 패턴 우선.
-상위 10개만 골라 한 줄씩: symbol | name | 근거(한 줄). JSON 배열만:
+상위 10개만 골라 주세요. 반드시 아래 형식의 JSON 배열만 출력하세요. 설명·서두 없이 배열 한 개만 출력.
 [{{"symbol":"005930.KS","name":"삼성전자","reason":"정배열+골드크로스, 이격도 1.02"}}, ...]"""
     full_prompt = PATTERN_DESCRIPTION + "\n\n" + user
     _plog = logging.getLogger(PIPELINE_LOG)
+    _plog.debug("==================== Gemini 요청 (batch_chart_analysis %s) ====================", market_label)
     _plog.debug("Gemini batch_chart_analysis 프롬프트 (앞 2500자):\n%s", full_prompt[:2500])
     err = ""
     for model_name in models_to_try:
         model = genai.GenerativeModel(model_name)
-        try:
-            resp = model.generate_content(
-                full_prompt,
-                generation_config=genai.types.GenerationConfig(temperature=0.2, max_output_tokens=2048),
-            )
-            text = (resp.text or "").strip()
-            if not text:
-                _plog.debug("Gemini batch_chart_analysis 응답: 빈 응답")
-            else:
-                _plog.debug("Gemini batch_chart_analysis 응답 (앞 1200자):\n%s", text[:1200])
-            arr = _parse_json_array_robust(text)
-            results = []
-            for x in (arr or []):
-                if isinstance(x, dict) and x.get("symbol"):
+        for attempt in range(MAX_RETRIES_PER_MODEL + 1):
+            _plog.info("Gemini 시도 모델: %s (batch_chart_analysis)%s", model_name, " 재시도" if attempt > 0 else "")
+            try:
+                resp = model.generate_content(
+                    full_prompt,
+                    generation_config=genai.types.GenerationConfig(temperature=0.2, max_output_tokens=2048),
+                )
+                text = (resp.text or "").strip()
+                if not text:
+                    _plog.debug("Gemini batch_chart_analysis 응답: 빈 응답")
+                else:
+                    _plog.debug("Gemini batch_chart_analysis 응답 (앞 1200자):\n%s", text[:1200])
+                _plog.debug("==================== Gemini 응답 끝 (batch_chart_analysis %s) ====================", market_label)
+                arr = _parse_json_array_robust(text)
+                results = []
+                for x in (arr or []):
+                    if not isinstance(x, dict):
+                        continue
+                    sym = (x.get("symbol") or x.get("ticker") or "").strip()
+                    if not sym:
+                        continue
                     results.append({
-                        "symbol": str(x.get("symbol", "")).strip(),
-                        "name": str(x.get("name", x.get("symbol", ""))).strip(),
+                        "symbol": sym,
+                        "name": str(x.get("name", sym)).strip(),
                         "reason": str(x.get("reason", ""))[:300],
                         "market": market_label,
                     })
-            _save_last_working_model(model_name)
-            return results[:10], None
-        except Exception as e:
-            err = str(e)
-            print("  [Gemini API 오류] batch_chart_analysis (%s):" % model_name, err[:500])
-            is_429 = "429" in err or "resource_exhausted" in err.lower()
-            if is_429 and models_to_try.index(model_name) + 1 < len(models_to_try):
-                print("  [로그] 한도 초과 → 다음 모델로 시도:", models_to_try[models_to_try.index(model_name) + 1])
-            elif not is_429:
-                return [], err
+                if results:
+                    _save_last_working_model(model_name)
+                    return results[:10], None
+                _plog.warning("Gemini 차트분석 응답에서 JSON 배열(종목 0건) 추출됨. 응답 앞 500자: %s", (text or "")[:500])
+            except Exception as e:
+                err = str(e)
+                print("  [Gemini API 오류] batch_chart_analysis (%s):" % model_name, err[:500])
+                is_quota = _is_quota_or_rate_error(err)
+                if not is_quota:
+                    return [], err
+                if attempt < MAX_RETRIES_PER_MODEL:
+                    print("  [로그] 한도/할당량 초과 → 같은 모델 재시도 (%s)" % model_name)
+                else:
+                    idx = models_to_try.index(model_name)
+                    if idx + 1 < len(models_to_try):
+                        print("  [로그] 한도/할당량 초과 → 다음 모델로 시도:", models_to_try[idx + 1])
+                if attempt >= MAX_RETRIES_PER_MODEL:
+                    break
     return [], err

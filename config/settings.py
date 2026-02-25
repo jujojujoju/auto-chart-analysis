@@ -24,6 +24,8 @@ TELEGRAM_CHAT_ID = get_env("TELEGRAM_CHAT_ID")
 # 선택 (없으면 해당 수집기 스킵)
 YOUTUBE_API_KEY = get_env("YOUTUBE_API_KEY")
 DART_API_KEY = get_env("DART_API_KEY")  # opendart.fss.or.kr 인증키
+# yfinance 실패 시 차트 데이터 대체 소스 (무료 키: https://www.alphavantage.co/support/#api-key)
+ALPHA_VANTAGE_API_KEY = get_env("ALPHA_VANTAGE_API_KEY")
 
 # 차트 패턴: True면 Gemini 대신 규칙 기반 매처만 사용 (API 비용/효율)
 USE_RULE_BASED_PATTERN = (get_env("USE_RULE_BASED_PATTERN", "").lower() in ("1", "true", "yes"))

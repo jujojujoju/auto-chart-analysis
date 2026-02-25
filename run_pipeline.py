@@ -219,13 +219,14 @@ def run():
     kr_candidates = _first_filter(kr_charts, kr_names, MAX_CANDIDATES)
     log.info("  미국: 입력 %d개 차트 → 필터 통과 %d개 후보 / 한국: 입력 %d개 → 통과 %d개", len(us_charts), len(us_candidates), len(kr_charts), len(kr_candidates))
     if us_candidates:
-        log.debug("  미국 후보 심볼: %s", [c["symbol"] for c in us_candidates[:10]])
+        log.debug("  미국 후보 심볼 (%d개 전체): %s", len(us_candidates), [c["symbol"] for c in us_candidates])
     if kr_candidates:
-        log.debug("  한국 후보 심볼: %s", [c["symbol"] for c in kr_candidates[:10]])
+        log.debug("  한국 후보 심볼 (%d개 전체): %s", len(kr_candidates), [c["symbol"] for c in kr_candidates])
 
     # --- 4. 종목 분석: 전문가/재무 데이터 수집(종목별 캐시 3일 TTL) 후 Gemini 배치 스코어링 ---
-    log.info("[4/6] 종목 분석: 미국 Seeking Alpha·Finviz·Yahoo / 한국 Fnguide → Gemini 배치 TOP 10")
+    log.info("[4/6] 종목 분석: 미국 Finviz·Yahoo / 한국 Fnguide → Gemini 배치 TOP 10")
     log.info("  종목별 캐시: %s (TTL %d일, 만료 시에만 재수집)", CACHE_DIR / "stock_analysis_us|kr", STOCK_ANALYSIS_CACHE_TTL_DAYS)
+    log.info("  퀀트 점수 공식: 기본40 + 괴리(20%%↑+25, 10%%↑+15) + OPM(10%%↑+25, 0%%↑+10) + PER(<10 +12, <15 +8, <25 +4, >80 -5) + PBR(<1 +8, <2 +4) + ROE(≥20%% +10, ≥15 +6, ≥10 +3) → 상한98")
     us_stock_data_list: list[dict[str, Any]] = []
     us_cache_hits = 0
     for ch in us_candidates[:MAX_CANDIDATES]:
@@ -250,14 +251,22 @@ def run():
                 "target_price": d.target_price,
                 "opm_pct": d.opm_pct,
                 "finviz_targets": d.finviz_targets,
-                "headlines": [],  # 미국은 Finviz·Yahoo 수치만 사용(헤드라인 미수집)
+                "headlines": [],
                 "finviz_url": getattr(d, "finviz_url", None),
+                "per": getattr(d, "per", None),
+                "pbr": getattr(d, "pbr", None),
+                "roe_pct": getattr(d, "roe_pct", None),
+                "eps": getattr(d, "eps", None),
+                "div_yield_pct": getattr(d, "div_yield_pct", None),
             }
             us_stock_data_list.append(row)
-            _save_stock_analysis_cached(cache_path, {k: v for k, v in row.items() if k in ("ticker", "name", "current_price", "target_price", "opm_pct", "headlines", "finviz_url")})
+            _cache_keys_us = ("ticker", "name", "current_price", "target_price", "opm_pct", "headlines", "finviz_url", "per", "pbr", "roe_pct", "eps", "div_yield_pct")
+            _save_stock_analysis_cached(cache_path, {k: v for k, v in row.items() if k in _cache_keys_us})
             fv_url = getattr(d, "finviz_url", None) or f"https://finviz.com/quote.ashx?t={ticker}"
             recom = next((r.get("value") for r in (d.finviz_targets or []) if "ecom" in r.get("key", "").lower() or "rec" in r.get("key", "").lower()), None)
-            log.debug("  미국 %s [신규 수집] Finviz %s → 목표가=%s Recom=%s 테이블 %d행, Yahoo(현재가·OPM)", ticker, fv_url, d.target_price, recom, len(d.finviz_targets or []))
+            n_rows = len(d.finviz_targets or [])
+            # Recom=Finviz 추천등급(Recommendation), 테이블 0행=해당 종목 페이지에서 목표가/추천 테이블 파싱된 행 수(0이면 없거나 파싱 실패)
+            log.debug("  미국 %s [신규 수집] Finviz 목표가=%s Recom(추천등급)=%s 파싱행=%d | Yahoo 현재가·OPM·PER·PBR·ROE", ticker, d.target_price, recom or "없음", n_rows)
             time.sleep(0.5)
         except Exception as ex:
             log.debug("  미국 요청 %s → 예외: %s", ch.get("symbol", "?"), ex)
@@ -265,8 +274,14 @@ def run():
     n_us_price = sum(1 for s in us_stock_data_list if s.get("current_price"))
     n_us_target = sum(1 for s in us_stock_data_list if s.get("target_price"))
     n_us_opm = sum(1 for s in us_stock_data_list if s.get("opm_pct") is not None)
-    log.info("  미국 데이터 소스: Finviz(목표가·Recom·테이블), Yahoo(현재가·OPM) — 헤드라인 미수집")
-    log.info("  미국 수집 결과: 총 %d종목. 현재가 있음 %d종목, 목표가 있음 %d종목, OPM 있음 %d종목. (캐시 %d건, 신규 수집 %d건)", len(us_stock_data_list), n_us_price, n_us_target, n_us_opm, us_cache_hits, len(us_stock_data_list) - us_cache_hits)
+    n_us_per = sum(1 for s in us_stock_data_list if s.get("per") is not None)
+    n_us_pbr = sum(1 for s in us_stock_data_list if s.get("pbr") is not None)
+    n_us_roe = sum(1 for s in us_stock_data_list if s.get("roe_pct") is not None)
+    log.info("  미국 데이터 소스: Finviz(목표가·Recom), Yahoo(현재가·OPM·PER·PBR·ROE)")
+    log.info("  미국 수집 결과: 총 %d종목 | 현재가 %d 목표가 %d OPM %d PER %d PBR %d ROE %d | 캐시 %d 신규 %d", len(us_stock_data_list), n_us_price, n_us_target, n_us_opm, n_us_per, n_us_pbr, n_us_roe, us_cache_hits, len(us_stock_data_list) - us_cache_hits)
+    if us_stock_data_list:
+        s0 = us_stock_data_list[0]
+        log.debug("  미국 수집 샘플(첫 종목): %s | 현재가=%s 목표가=%s OPM=%s PER=%s PBR=%s ROE=%s", s0.get("ticker"), s0.get("current_price"), s0.get("target_price"), s0.get("opm_pct"), s0.get("per"), s0.get("pbr"), s0.get("roe_pct"))
 
     kr_stock_data_list = []
     kr_cache_hits = 0
@@ -296,6 +311,24 @@ def run():
                 "opm_pct": d.opm_pct,
                 "headlines": hr_list,
                 "fnguide_url": getattr(d, "fnguide_url", None),
+                "per": getattr(d, "per", None),
+                "pbr": getattr(d, "pbr", None),
+                "roe_pct": getattr(d, "roe_pct", None),
+                "eps": getattr(d, "eps", None),
+                "debt_ratio_pct": getattr(d, "debt_ratio_pct", None),
+                "div_yield_pct": getattr(d, "div_yield_pct", None),
+                "actual_op_income_100m": getattr(d, "actual_op_income_100m", None),
+                "expected_op_yoy_pct": getattr(d, "expected_op_yoy_pct", None),
+                "yoy_pct": getattr(d, "yoy_pct", None),
+                "market_cap_100m": getattr(d, "market_cap_100m", None),
+                "foreign_pct": getattr(d, "foreign_pct", None),
+                "beta": getattr(d, "beta", None),
+                "return_1m_pct": getattr(d, "return_1m_pct", None),
+                "return_3m_pct": getattr(d, "return_3m_pct", None),
+                "return_1y_pct": getattr(d, "return_1y_pct", None),
+                "business_summary": getattr(d, "business_summary", None),
+                "consensus_line": getattr(d, "consensus_line", None),
+                "institutional_holdings": getattr(d, "institutional_holdings", None) or [],
             }
             kr_stock_data_list.append(row)
             _save_stock_analysis_cached(cache_path, row)
@@ -314,8 +347,89 @@ def run():
     n_kr_target = sum(1 for s in kr_stock_data_list if s.get("target_price"))
     n_kr_opm = sum(1 for s in kr_stock_data_list if s.get("opm_pct") is not None)
     n_kr_hl = sum(1 for s in kr_stock_data_list if s.get("headlines"))
-    log.info("  한국 데이터 소스: Fnguide(SVD_Main, 영업이익률·목표가·리포트 문구)")
-    log.info("  한국 수집 결과: 총 %d종목. 그 중 현재가 있음 %d종목, 목표가 있음 %d종목, OPM 있음 %d종목, 리포트 있음 %d종목. (캐시 %d건, 신규 수집 %d건)", len(kr_stock_data_list), n_kr_price, n_kr_target, n_kr_opm, n_kr_hl, kr_cache_hits, len(kr_stock_data_list) - kr_cache_hits)
+    n_kr_per = sum(1 for s in kr_stock_data_list if s.get("per") is not None)
+    n_kr_pbr = sum(1 for s in kr_stock_data_list if s.get("pbr") is not None)
+    n_kr_roe = sum(1 for s in kr_stock_data_list if s.get("roe_pct") is not None)
+    n_kr_yoy = sum(1 for s in kr_stock_data_list if s.get("yoy_pct") is not None)
+    n_kr_cons = sum(1 for s in kr_stock_data_list if s.get("consensus_line"))
+    log.info("  한국 데이터 소스: Fnguide(SVD_Main, 실적이슈·시세현황·목표가·컨센서스·Business Summary)")
+    log.info("  한국 수집 결과: 총 %d종목 | 현재가 %d 목표가 %d OPM %d PER %d PBR %d ROE %d 전년대비 %d 컨센서스 %d 리포트 %d | 캐시 %d 신규 %d", len(kr_stock_data_list), n_kr_price, n_kr_target, n_kr_opm, n_kr_per, n_kr_pbr, n_kr_roe, n_kr_yoy, n_kr_cons, n_kr_hl, kr_cache_hits, len(kr_stock_data_list) - kr_cache_hits)
+    if kr_stock_data_list:
+        s0 = kr_stock_data_list[0]
+        log.debug("  한국 수집 샘플(첫 종목): %s | 현재가=%s 목표가=%s OPM=%s PER=%s PBR=%s ROE=%s 전년대비=%s 컨센서스=%s", s0.get("ticker"), s0.get("current_price"), s0.get("target_price"), s0.get("opm_pct"), s0.get("per"), s0.get("pbr"), s0.get("roe_pct"), s0.get("yoy_pct"), (s0.get("consensus_line") or "")[:40])
+
+    def _compute_quant_score(s: dict) -> tuple[float, str]:
+        """공식으로 계산 가능한 지표만 사용해 0~100 퀀트 점수. (괴리·OPM·PER·PBR·ROE)"""
+        score = 40.0
+        reason_parts = []
+        try:
+            cp = float(s.get("current_price") or 0)
+            tp = float(s.get("target_price") or 0)
+            if cp > 0 and tp > 0:
+                gap = (tp - cp) / cp * 100
+                if gap >= 20:
+                    score += 25
+                    reason_parts.append("괴리%.0f%%" % gap)
+                elif gap >= 10:
+                    score += 15
+                    reason_parts.append("괴리%.0f%%" % gap)
+        except (TypeError, ValueError):
+            pass
+        try:
+            opm = float(s.get("opm_pct") or 0)
+            if opm >= 99:
+                reason_parts.append("OPM(과대·확인)")
+            elif opm >= 10:
+                score += 25
+                reason_parts.append("OPM%.0f%%" % opm)
+            elif opm >= 0:
+                score += 10
+                reason_parts.append("OPM%.0f%%" % opm)
+        except (TypeError, ValueError):
+            pass
+        try:
+            per = s.get("per") is not None and float(s["per"]) or None
+            if per is not None and 0 < per < 1000:
+                if per < 10:
+                    score += 12
+                    reason_parts.append("PER%.1f" % per)
+                elif per < 15:
+                    score += 8
+                    reason_parts.append("PER%.1f" % per)
+                elif per < 25:
+                    score += 4
+                if per > 80:
+                    score -= 5
+        except (TypeError, ValueError):
+            pass
+        try:
+            pbr = s.get("pbr") is not None and float(s["pbr"]) or None
+            if pbr is not None and 0 < pbr < 1000:
+                if pbr < 1:
+                    score += 8
+                    reason_parts.append("PBR%.2f" % pbr)
+                elif pbr < 2:
+                    score += 4
+        except (TypeError, ValueError):
+            pass
+        try:
+            roe = s.get("roe_pct") is not None and float(s["roe_pct"]) or None
+            if roe is not None and -100 < roe < 1000:
+                if roe >= 20:
+                    score += 10
+                    reason_parts.append("ROE%.0f%%" % roe)
+                elif roe >= 15:
+                    score += 6
+                elif roe >= 10:
+                    score += 3
+        except (TypeError, ValueError):
+            pass
+        reason = ", ".join(reason_parts) if reason_parts else "괴리·OPM·PER·PBR·ROE 기준"
+        return min(98.0, max(0.0, score)), reason
+
+    def _fallback_score(s: dict):
+        """API 미사용 시 퀀트 점수(괴리·OPM·PER·PBR·ROE)로 0~100."""
+        return _compute_quant_score(s)
 
     stock_top10_us = []
     stock_top10_kr = []
@@ -324,8 +438,17 @@ def run():
     if GEMINI_API_KEY:
         to_send_us = us_stock_data_list[:50]
         to_send_kr = kr_stock_data_list[:50]
+        for s in to_send_us + to_send_kr:
+            sc, re = _compute_quant_score(s)
+            s["quant_score"] = round(sc, 1)
+            s["quant_reason"] = re
+            log.debug("  [퀀트 산정] %s %s | 현재가=%s 목표가=%s OPM=%s PER=%s PBR=%s ROE=%s → 점수=%.1f (%s)", s.get("ticker"), s.get("name"), s.get("current_price"), s.get("target_price"), s.get("opm_pct"), s.get("per"), s.get("pbr"), s.get("roe_pct"), sc, re)
+        us_by_score = sorted(to_send_us, key=lambda x: -(x.get("quant_score") or 0))[:5]
+        kr_by_score = sorted(to_send_kr, key=lambda x: -(x.get("quant_score") or 0))[:5]
+        log.info("  퀀트 점수 산정 완료 (미국 상위 5): %s", ", ".join("%s %.1f(%s)" % (s["ticker"], s.get("quant_score", 0), (s.get("quant_reason") or "")[:30]) for s in us_by_score))
+        log.info("  퀀트 점수 산정 완료 (한국 상위 5): %s", ", ".join("%s %.1f(%s)" % (s["ticker"], s.get("quant_score", 0), (s.get("quant_reason") or "")[:30]) for s in kr_by_score))
         log.info("  Gemini 종목분석 입력: 미국 %d종목, 한국 %d종목 (배치 %d개씩, 배치 간 %ds 대기)", len(to_send_us), len(to_send_kr), BATCH_SIZE, GEMINI_SLEEP_SEC)
-        log.info("  Gemini에 보내는 항목: ticker, name, current_price, target_price, OPM%%, headlines(최대 5개) → Score=Gap 30%% + Fundamental 40%% + Sentiment 30%%")
+        log.info("  Gemini에 보내는 항목: 퀀트점수(괴리·OPM·PER·PBR·ROE) + ticker, 현재가, 목표가, OPM%%, PER/PBR/ROE, 헤드라인 → Sentiment 반영 후 TOP 10")
         stock_top10_us, err_us = batch_stock_analysis_with_scores(
             to_send_us, GEMINI_API_KEY, BATCH_SIZE, GEMINI_SLEEP_SEC, "US"
         )
@@ -354,48 +477,22 @@ def run():
     else:
         stock_fallback_reason_us = "Gemini API 키 없음(GEMINI_API_KEY 미설정)"
         stock_fallback_reason_kr = "Gemini API 키 없음(GEMINI_API_KEY 미설정)"
-    def _fallback_score(s):
-        """API 미사용 시 괴리율·OPM으로 0~100 근사 점수."""
-        score = 40
-        reason_parts = []
-        try:
-            cp, tp = float(s.get("current_price") or 0), float(s.get("target_price") or 0)
-            if cp > 0 and tp > 0:
-                gap = (tp - cp) / cp * 100
-                if gap >= 20:
-                    score += 25
-                    reason_parts.append("괴리%.0f%%" % gap)
-                elif gap >= 10:
-                    score += 15
-                    reason_parts.append("괴리%.0f%%" % gap)
-        except (TypeError, ValueError):
-            pass
-        try:
-            opm = float(s.get("opm_pct") or 0)
-            if opm >= 99:
-                reason_parts.append("OPM(과대·파싱확인)")
-            elif opm >= 10:
-                score += 25
-                reason_parts.append("OPM%.0f%%" % opm)
-            elif opm >= 0:
-                score += 10
-                reason_parts.append("OPM%.0f%%" % opm)
-        except (TypeError, ValueError):
-            pass
-        reason = ", ".join(reason_parts) if reason_parts else "괴리·OPM 데이터 기준"
-        return min(95, score), reason
 
     if not stock_top10_us and us_stock_data_list:
-        log.info("  미국 종목 TOP10: API 미사용 → 괴리율·OPM 기준 폴백 점수로 상위 10개 채움")
+        log.info("  미국 종목 TOP10: API 미사용 → 퀀트 점수(괴리·OPM·PER·PBR·ROE) 폴백으로 상위 10개 채움")
         log.info("  [API 미사용 사유] 미국 종목분석: %s", stock_fallback_reason_us or "API 호출 안 함 또는 결과 없음")
-        for s in us_stock_data_list[:10]:
-            sc, re = _fallback_score(s)
+        us_scored = [(_compute_quant_score(s), s) for s in us_stock_data_list]
+        us_scored.sort(key=lambda x: -x[0][0])
+        for (sc, re), s in us_scored[:10]:
+            log.debug("  [퀀트 폴백] 미국 %s | 현재가=%s 목표가=%s OPM=%s PER=%s PBR=%s ROE=%s → %.1f (%s)", s.get("ticker"), s.get("current_price"), s.get("target_price"), s.get("opm_pct"), s.get("per"), s.get("pbr"), s.get("roe_pct"), sc, re)
             stock_top10_us.append({"ticker": s["ticker"], "name": s["name"], "score": sc, "reason": re, "market": "US"})
     if not stock_top10_kr and kr_stock_data_list:
-        log.info("  한국 종목 TOP10: API 미사용 → 괴리율·OPM 기준 폴백 점수로 상위 10개 채움")
+        log.info("  한국 종목 TOP10: API 미사용 → 퀀트 점수(괴리·OPM·PER·PBR·ROE) 폴백으로 상위 10개 채움")
         log.info("  [API 미사용 사유] 한국 종목분석: %s", stock_fallback_reason_kr or "API 호출 안 함 또는 결과 없음")
-        for s in kr_stock_data_list[:10]:
-            sc, re = _fallback_score(s)
+        kr_scored = [(_compute_quant_score(s), s) for s in kr_stock_data_list]
+        kr_scored.sort(key=lambda x: -x[0][0])
+        for (sc, re), s in kr_scored[:10]:
+            log.debug("  [퀀트 폴백] 한국 %s | 현재가=%s 목표가=%s OPM=%s PER=%s PBR=%s ROE=%s → %.1f (%s)", s.get("ticker"), s.get("current_price"), s.get("target_price"), s.get("opm_pct"), s.get("per"), s.get("pbr"), s.get("roe_pct"), sc, re)
             stock_top10_kr.append({"ticker": s["ticker"], "name": s["name"], "score": sc, "reason": re, "market": "KR"})
 
     # --- 5. 차트 분석: 정배열·골드크로스·이격도·RSI → 규칙/Gemini TOP 10 ---
@@ -470,41 +567,41 @@ def run():
         log.info("  [API 미사용 사유] 한국 차트분석: %s", chart_fallback_reason_kr or "API 호출 안 함 또는 결과 없음")
         chart_top10_kr = _chart_top10_by_rule(kr_candidates, kr_names, "KR")
 
-    # --- 6. 텔레그램 포맷 (아이콘·섹션) ---
+    # --- 6. 텔레그램 포맷 (HTML, 날짜·섹션 구분) ---
     log.info("[6/6] 텔레그램 전송")
     def esc(t):
         t = (t or "").replace("```", "").replace("&", "＆").replace("<", "＜").replace(">", "＞")
         return t[:250]
 
+    report_date = datetime.now().strftime("%Y-%m-%d %H:%M")
     parts = [
-        "📊 <b>AI 투자 비서 리포트</b>",
+        "📊 <b>AI 투자 비서</b>",
+        "📅 " + report_date,
         "",
-        "━━━━━━━━━━━━━━━━━━━━",
-        "📌 <b>1. 종목 분석</b> (Gap 30% + Fundamental 40% + Sentiment 30%)",
-        "━━━━━━━━━━━━━━━━━━━━",
+        "▸ <b>1. 종목 분석</b> (퀀트+Sentiment TOP10)",
         "",
-        "🇰🇷 <b>한국 TOP 10</b>",
+        "🇰🇷 <b>한국</b>",
     ]
     for i, r in enumerate(stock_top10_kr[:10], 1):
-        parts.append("%d. %s (%s) | Score %s\n   %s" % (i, esc(r.get("name")), r.get("ticker"), r.get("score"), esc(r.get("reason"))))
+        parts.append("  %d. %s <code>%s</code> · %s\n     <i>%s</i>" % (i, esc(r.get("name")), r.get("ticker", ""), r.get("score"), esc(r.get("reason"))))
     parts.append("")
-    parts.append("🇺🇸 <b>미국 TOP 10</b>")
+    parts.append("🇺🇸 <b>미국</b>")
     for i, r in enumerate(stock_top10_us[:10], 1):
-        parts.append("%d. %s (%s) | Score %s\n   %s" % (i, esc(r.get("name")), r.get("ticker"), r.get("score"), esc(r.get("reason"))))
+        parts.append("  %d. %s <code>%s</code> · %s\n     <i>%s</i>" % (i, esc(r.get("name")), r.get("ticker", ""), r.get("score"), esc(r.get("reason"))))
     parts.extend([
         "",
-        "━━━━━━━━━━━━━━━━━━━━",
-        "📈 <b>2. 차트 분석</b> (50/100/200 정배열·골드크로스·이격도·RSI)",
-        "━━━━━━━━━━━━━━━━━━━━",
+        "▸ <b>2. 차트 분석</b> (정배열·골드크로스·이격도·RSI TOP10)",
         "",
-        "🇰🇷 <b>한국 TOP 10</b>",
+        "🇰🇷 <b>한국</b>",
     ])
     for i, r in enumerate(chart_top10_kr[:10], 1):
-        parts.append("%d. %s (%s)\n   %s" % (i, esc(r.get("name")), r.get("symbol"), esc(r.get("reason"))))
+        parts.append("  %d. %s <code>%s</code>\n     <i>%s</i>" % (i, esc(r.get("name")), r.get("symbol", ""), esc(r.get("reason"))))
     parts.append("")
-    parts.append("🇺🇸 <b>미국 TOP 10</b>")
+    parts.append("🇺🇸 <b>미국</b>")
     for i, r in enumerate(chart_top10_us[:10], 1):
-        parts.append("%d. %s (%s)\n   %s" % (i, esc(r.get("name")), r.get("symbol"), esc(r.get("reason"))))
+        parts.append("  %d. %s <code>%s</code>\n     <i>%s</i>" % (i, esc(r.get("name")), r.get("symbol", ""), esc(r.get("reason"))))
+    parts.append("")
+    parts.append("— 퀀트·차트 기반 참고용, 투자 책임은 본인에게 있습니다 —")
 
     message = "\n".join(parts)
     chunk = 4000
